@@ -28,6 +28,10 @@ import subprocess
 import sys
 import warnings
 
+# Single source of truth for the WER metric (scripts/asr_metrics.py).
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from asr_metrics import wer as _wer  # noqa: E402
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
 try:
@@ -76,20 +80,13 @@ def resolve_head(requested, arch):
 
 
 def wer(ref, hyp):
-    """Word-level error rate: Levenshtein distance over whitespace tokens / |ref|."""
-    r = ref.split()
-    h = hyp.split()
-    if not r:
-        return 0.0 if not h else 1.0
-    # Classic DP edit distance over word tokens.
-    prev = list(range(len(h) + 1))
-    for i, rw in enumerate(r, 1):
-        cur = [i]
-        for j, hw in enumerate(h, 1):
-            cost = 0 if rw == hw else 1
-            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost))
-        prev = cur
-    return prev[len(h)] / len(r)
+    """Word-level error rate: Levenshtein distance over whitespace tokens / |ref|.
+
+    Delegates to scripts/asr_metrics.wer. This harness has always compared the
+    raw (unnormalized) whitespace tokens — an exact byte-for-byte parity check —
+    so we keep that behavior by disabling the shared normalizer here.
+    """
+    return _wer(ref, hyp, normalize_text=False)
 
 
 def nemo_text(m, head):
