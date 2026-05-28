@@ -28,7 +28,8 @@ set(PARAKEET_SRC
     src/model_loader.cpp
     src/ggml_graph.cpp
     src/fft.cpp
-    src/mel.cpp)
+    src/mel.cpp
+    src/subsampling.cpp)
 
 if(PARAKEET_SHARED)
   add_library(parakeet SHARED ${PARAKEET_SRC})
