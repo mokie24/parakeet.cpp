@@ -1,0 +1,24 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: configure
+        # GGML_NATIVE=OFF for portability in CI (no host-cpu ISA extensions)
+        run: cmake -B build -DPARAKEET_BUILD_TESTS=ON -DGGML_NATIVE=OFF
+
+      - name: build
+        run: cmake --build build -j
+
+      - name: test (model-independent only)
+        # -LE model excludes the model-labelled tests (check_convert,
+        # test_model_loader, check_baseline) that need the Python venv and the
+        # cached NeMo checkpoint.  Those will run in a separate workflow_dispatch
+        # job once a models bundle is published (Phase 4).
+        run: ctest --test-dir build --output-on-failure -LE model
