@@ -78,9 +78,9 @@ dependency.
 The FastConformer encoder is the shared backbone, built and proven first; then
 each decoder is layered on.
 
-- **Phase 0 — Scaffolding:** repo, CMake + ggml submodule, `audio_io`, GGUF
-  `model_loader` skeleton, CLI skeleton, converter skeleton, Python
-  baseline-dumper harness.
+- **Phase 0 — Scaffolding:** Python reference environment (see §8), repo,
+  CMake + ggml submodule, `audio_io`, GGUF `model_loader` skeleton, CLI
+  skeleton, converter skeleton, Python baseline-dumper harness.
 - **Phase 1 — Backbone (milestone):** log-mel preprocessing + FastConformer
   encoder + CTC decoder → end-to-end CTC transcription. Tensor parity through
   every stage; token parity end-to-end. Anchor: `nvidia/parakeet-ctc-0.6b`.
@@ -171,7 +171,30 @@ WAV → audio_io(16k mono) → mel[80,T] → subsampling(÷8) → FastConformer 
 - `scripts/convert_parakeet_to_gguf.py` loads via `nemo_toolkit[asr]` (or direct
   `.nemo` tarball parse).
 
-## 8. Parity & testing strategy (A+C blended)
+## 8. Python reference environment (hard prerequisite)
+
+The A+C parity strategy depends on running the real NeMo model to dump reference
+tensors. This is a hard prerequisite for Phase 1+, set up in Phase 0.
+
+- A project-local venv at `.venv` (managed with `uv`), CPU torch (the dev box
+  has no GPU), plus `nemo_toolkit[asr]`:
+
+  ```
+  uv venv .venv --python 3.12
+  uv pip install --python .venv torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+  uv pip install --python .venv "nemo_toolkit[asr]"
+  ```
+
+- `scripts/requirements.txt` pins the reference deps so CI / contributors can
+  reproduce the baselines.
+- Both `scripts/gen_nemo_baseline.py` (tensor + token dumps) and
+  `scripts/convert_parakeet_to_gguf.py` run inside this venv: the converter reads
+  the `.nemo` checkpoint via NeMo, the baseline dumper hooks NeMo module forwards
+  to capture intermediate tensors.
+- Reference checkpoints are pulled from HuggingFace on first use and cached;
+  baseline fixtures committed to the repo are small (single short clip).
+
+## 9. Parity & testing strategy (A+C blended)
 
 - Per-stage **tensor parity** for the deterministic numerical path
   (preprocessing + encoder + CTC logits); **token-id / WER parity** for the
@@ -187,7 +210,7 @@ WAV → audio_io(16k mono) → mel[80,T] → subsampling(÷8) → FastConformer 
 - Model-dependent tests use `SKIP_RETURN_CODE=77`. Small baseline fixtures are
   committed.
 
-## 9. C-API & build
+## 10. C-API & build
 
 - `parakeet_capi.h` flat surface (Phase 4): `load` / `unload`,
   `transcribe_path`, `transcribe_buffer` (f32 PCM), result getters (text +
@@ -197,7 +220,7 @@ WAV → audio_io(16k mono) → mel[80,T] → subsampling(÷8) → FastConformer 
   `PARAKEET_SHARED` + `PARAKEET_GGML_{CUDA,METAL,VULKAN,HIPBLAS}` passthrough.
   CPU is the supported path; GPU wired but not CI-exercised.
 
-## 10. Definition of done per phase
+## 11. Definition of done per phase
 
 - **Phase 1:** `parakeet-ctc-0.6b` transcribes a test clip correctly;
   mel/subsampling/encoder/CTC tensor parity within tolerance; `parakeet-cli
@@ -206,7 +229,7 @@ WAV → audio_io(16k mono) → mel[80,T] → subsampling(÷8) → FastConformer 
 - **Phase 3:** `parakeet-tdt-0.6b-v2` greedy token parity + WER on clip set.
 - **Phase 4:** quantized GGUFs published; C-API + LocalAI backend; full CI.
 
-## 11. Out of scope (v1)
+## 12. Out of scope (v1)
 
 - Beam search / external LM fusion (greedy only initially).
 - Cache-aware streaming (Phase 5).
@@ -214,7 +237,7 @@ WAV → audio_io(16k mono) → mel[80,T] → subsampling(÷8) → FastConformer 
 - Batch size > 1 (always B=1).
 - AED / multitask (Canary) models.
 
-## 12. Reference
+## 13. Reference
 
 - NeMo (local): `/home/mudler/_git/NeMo`
   - `nemo/collections/asr/modules/audio_preprocessing.py`
