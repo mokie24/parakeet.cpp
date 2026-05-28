@@ -10,10 +10,11 @@ C++ side never re-derives the mel filterbank with librosa.
 See ``docs/conversion.md`` for the full schema.
 """
 import argparse
+import pathlib
 import sys
 import warnings
 
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=UserWarning)
 import numpy as np
 
 try:
@@ -59,12 +60,12 @@ def main():
     ap.add_argument("--output", required=True)
     args = ap.parse_args()
 
-    is_hf_id = "/" in args.model and not args.model.endswith(".nemo")
+    is_local = pathlib.Path(args.model).exists()
     try:
-        if is_hf_id:
-            m = ASRModel.from_pretrained(args.model, map_location="cpu")
-        else:
+        if is_local:
             m = ASRModel.restore_from(args.model, map_location="cpu")
+        else:
+            m = ASRModel.from_pretrained(args.model, map_location="cpu")
     except Exception as e:  # pragma: no cover - network/cache guard
         print(f"PARAKEET_MODEL_UNAVAILABLE: {e}", file=sys.stderr)
         sys.exit(2)
@@ -133,6 +134,11 @@ def main():
     if arch in ("tdt", "hybrid_tdt_ctc"):
         durs = (_get(_get(cfg, "decoding", {}) or {}, "durations")
                 or _get(_get(cfg, "model_defaults", {}) or {}, "tdt_durations"))
+        if not durs:
+            raise ValueError(
+                f"arch={arch} requires TDT durations but none found in "
+                "cfg.decoding.durations or cfg.model_defaults.tdt_durations"
+            )
         w.add_array("parakeet.tdt.durations", [int(d) for d in durs])
 
     # tensors: verbatim names, f32. Include featurizer buffers explicitly.

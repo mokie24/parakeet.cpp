@@ -59,6 +59,12 @@ assert any(n.startswith("encoder.pre_encode") for n in names), "no subsampling t
 # hybrid anchor must carry both heads
 assert any(n.startswith("ctc_decoder.") for n in names), "no ctc head"
 assert any(n.startswith("joint.") for n in names), "no joint"
+# hybrid_tdt_ctc must carry the prediction network
+assert any(n.startswith("decoder.prediction.") for n in names), "no prediction net"
+# arch KV must identify this as hybrid_tdt_ctc
+_arch_field = kv["parakeet.arch"]
+_arch_val = bytes(_arch_field.parts[-1]).decode("utf-8").rstrip("\x00")
+assert _arch_val == "hybrid_tdt_ctc", f"expected arch=hybrid_tdt_ctc, got {_arch_val!r}"
 
 print("check_convert OK:", len(names), "tensors")
 sys.exit(0)
