@@ -116,14 +116,31 @@ parakeet-cli transcribe --model m.gguf --input audio.wav
 parakeet-cli transcribe --model m.gguf --input audio.wav --decoder ctc
 parakeet-cli transcribe --model m.gguf --input audio.wav --decoder tdt
 
+# Per-word timestamps + confidence: one line per word
+#   <start>-<end>  <word>  (<conf>)   (times in seconds)
+parakeet-cli transcribe --model m.gguf --input audio.wav --timestamps
+
+# JSON with the flat text plus per-word and per-token timestamps + confidence:
+#   {"text":"...","words":[{"w":..,"start":..,"end":..,"conf":..}],
+#    "tokens":[{"id":..,"t":..,"conf":..}]}
+parakeet-cli transcribe --model m.gguf --input audio.wav --json
+
 # Print model metadata (arch, dims, mel params, vocab size, TDT durations)
 parakeet-cli info m.gguf
 
 # Cache-aware streaming (EOU model parakeet_realtime_eou_120m-v1): feeds the WAV
 # in the model's chunk schedule, prints partial text incrementally and
-# [EOU @ <t>s] / [EOB @ <t>s] event markers, then the finalized tail.
+# [EOU @ <t>s] / [EOB @ <t>s] event markers, then the finalized tail. Add
+# --timestamps to also print per-word [start-end] (conf) lines as words finalize.
 parakeet-cli transcribe --model eou.gguf --input audio.wav --stream
 ```
+
+Timestamps + confidence match NeMo's `transcribe(timestamps=True)` with the
+`max_prob` confidence method exactly (word offsets to 0.0 s, per-token/word
+confidence within `≤5e-6`), for both the TDT and CTC heads — see `docs/parity.md`.
+Word start/end are in seconds (`frame × hop × subsampling / sample_rate`,
+= 0.08 s/frame here); confidence is the rescaled softmax probability of the
+emitted token, aggregated per word with NeMo's `min`.
 
 The `parakeet-cli` binary is at `build/examples/cli/parakeet-cli`.
 
@@ -153,6 +170,17 @@ char *text = parakeet_capi_transcribe_pcm(ctx, samples, n_samples,
                                           sample_rate, 0 /*default*/);
 ```
 
+Timestamps + confidence as JSON (matches NeMo `timestamps=True` + `max_prob`):
+```c
+char *json = parakeet_capi_transcribe_path_json(ctx, "audio.wav", 0 /*default*/);
+// {"text":"...",
+//  "words":[{"w":"Well,","start":0.480,"end":0.640,"conf":0.7859}, ...],
+//  "tokens":[{"id":639,"t":0.480,"conf":0.9969}, ...]}
+if (json) { printf("%s\n", json); parakeet_capi_free_string(json); }
+```
+`start`/`end`/`t` are seconds; `conf` is the rescaled softmax probability of the
+emitted token in `(0,1]` (word `conf` = the `min` aggregate over its tokens).
+
 ### Streaming (cache-aware EOU model)
 
 For `parakeet_realtime_eou_120m-v1`, a streaming session decodes 16 kHz mono f32
@@ -177,8 +205,12 @@ markers). The streaming transcript matches NeMo's cache-aware streaming exactly;
 would not emit.
 
 The LocalAI backend (in the LocalAI repo) dlopens `libparakeet.so` and uses
-these symbols directly (offline `parakeet_capi_transcribe_*` and streaming
-`parakeet_capi_stream_*`). See `include/parakeet_capi.h` for the full API.
+these symbols directly (offline `parakeet_capi_transcribe_*` /
+`parakeet_capi_transcribe_path_json` and streaming `parakeet_capi_stream_*`). See
+`include/parakeet_capi.h` for the full API. The C++ streaming session
+(`pk::StreamingSession`) additionally exposes per-word timestamps + confidence as
+words finalize via `drain_words()` (alongside the EOU events), which the CLI
+`--stream --timestamps` path prints.
 
 ---
 

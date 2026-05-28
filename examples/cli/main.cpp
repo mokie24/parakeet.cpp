@@ -1,9 +1,13 @@
 #include "parakeet.h"
+#include "parakeet_capi.h"
+#include "model.hpp"
 #include "model_loader.hpp"
 #include "audio_io.hpp"
 #include "streaming.hpp"
+#include "transcription.hpp"
 #include "ggml.h"
 #include "gguf.h"
+#include <memory>
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -60,7 +64,11 @@ static int cmd_info(const char* path) {
 // to a pk::StreamingSession in the model's exact chunk schedule, printing partial
 // text incrementally and `[EOU @ <t>s]` / `[EOB @ <t>s]` markers when events
 // fire, then the finalize() tail. Returns 0/1.
-static int cmd_transcribe_stream(const std::string& model, const std::string& input) {
+//
+// When `timestamps` is set, also prints one line per finalized word
+// (`<start>-<end>  <word>  (<conf>)`) after the running text/EOU line.
+static int cmd_transcribe_stream(const std::string& model, const std::string& input,
+                                 bool timestamps) {
     pk::ModelLoader ml;
     if (!ml.load(model)) {
         std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
@@ -80,11 +88,13 @@ static int cmd_transcribe_stream(const std::string& model, const std::string& in
 
     try {
         pk::StreamingSession sess(ml);
+        std::vector<pk::Word> all_words;  // collected for the --timestamps recap
         std::printf("[stream] ");
         std::fflush(stdout);
         pk::run_stream_over_pcm(
             sess, ml, audio.samples,
-            [&](const std::string& new_text, const std::vector<pk::EouEvent>& evs) {
+            [&](const std::string& new_text, const std::vector<pk::EouEvent>& evs,
+                const std::vector<pk::Word>& words) {
                 if (!new_text.empty()) {
                     std::printf("%s", new_text.c_str());
                     std::fflush(stdout);
@@ -93,14 +103,26 @@ static int cmd_transcribe_stream(const std::string& model, const std::string& in
                     std::printf(" [%s @ %.2fs]", e.is_eob ? "EOB" : "EOU", e.time_sec);
                     std::fflush(stdout);
                 }
+                if (timestamps)
+                    all_words.insert(all_words.end(), words.begin(), words.end());
             });
         // Flush the end-of-stream tail (no extra <EOU> is fabricated if NeMo's
         // streaming would not emit one for this clip).
         std::string tail = sess.finalize();
         if (!tail.empty()) std::printf("%s", tail.c_str());
+        if (timestamps) {
+            // The trailing open word finalizes only at finalize(); drain it now.
+            std::vector<pk::Word> last = sess.drain_words();
+            all_words.insert(all_words.end(), last.begin(), last.end());
+        }
         std::printf("\n");
         // Also print the full transcript on its own line for easy capture.
         std::printf("[stream:final] %s\n", sess.text().c_str());
+        if (timestamps) {
+            for (const pk::Word& w : all_words)
+                std::printf("%.2f-%.2f  %s  (%.2f)\n", w.start, w.end,
+                            w.text.c_str(), w.conf);
+        }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "parakeet-cli: streaming failed: %s\n", e.what());
         return 1;
@@ -116,6 +138,8 @@ static int cmd_transcribe_stream(const std::string& model, const std::string& in
 static int cmd_transcribe(int argc, char** argv) {
     std::string model, input, decoder_str;
     bool stream = false;
+    bool timestamps = false;
+    bool json = false;
     for (int i = 0; i < argc; ++i) {
         if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             model = argv[++i];
@@ -125,12 +149,16 @@ static int cmd_transcribe(int argc, char** argv) {
             decoder_str = argv[++i];
         } else if (std::strcmp(argv[i], "--stream") == 0) {
             stream = true;
+        } else if (std::strcmp(argv[i], "--timestamps") == 0) {
+            timestamps = true;
+        } else if (std::strcmp(argv[i], "--json") == 0) {
+            json = true;
         }
     }
     if (model.empty() || input.empty()) {
         std::fprintf(stderr,
             "usage: parakeet-cli transcribe --model <m.gguf> --input <wav> "
-            "[--decoder ctc|tdt] [--stream]\n");
+            "[--decoder ctc|tdt] [--stream] [--timestamps] [--json]\n");
         return 2;
     }
 
@@ -139,21 +167,68 @@ static int cmd_transcribe(int argc, char** argv) {
             std::fprintf(stderr,
                 "parakeet-cli: --stream is RNN-T only; --decoder is ignored\n");
         }
-        return cmd_transcribe_stream(model, input);
+        if (json) {
+            std::fprintf(stderr,
+                "parakeet-cli: --json is not supported with --stream\n");
+            return 2;
+        }
+        return cmd_transcribe_stream(model, input, timestamps);
     }
 
     // Resolve the decoder selector.
     pk::Decoder dec = pk::Decoder::kDefault;
+    int dec_int = 0;  // C-API decoder selector (0 default, 1 ctc, 2 tdt)
     if (!decoder_str.empty()) {
         if (decoder_str == "ctc") {
             dec = pk::Decoder::kCTC;
+            dec_int = 1;
         } else if (decoder_str == "tdt") {
             dec = pk::Decoder::kTDT;
+            dec_int = 2;
         } else {
             std::fprintf(stderr, "parakeet-cli: unknown --decoder '%s' (want ctc|tdt)\n",
                          decoder_str.c_str());
             return 2;
         }
+    }
+
+    // --json: emit the C-API JSON document (text + word/token timestamps + conf).
+    if (json) {
+        parakeet_ctx* ctx = parakeet_capi_load(model.c_str());
+        if (!ctx) {
+            std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
+            return 1;
+        }
+        char* j = parakeet_capi_transcribe_path_json(ctx, input.c_str(), dec_int);
+        if (!j) {
+            std::fprintf(stderr, "parakeet-cli: transcribe failed: %s\n",
+                         parakeet_capi_last_error(ctx));
+            parakeet_capi_free(ctx);
+            return 1;
+        }
+        std::printf("%s\n", j);
+        parakeet_capi_free_string(j);
+        parakeet_capi_free(ctx);
+        return 0;
+    }
+
+    // --timestamps: print one line per word `<start>-<end>  <word>  (<conf>)`.
+    if (timestamps) {
+        try {
+            std::unique_ptr<pk::Model> m = pk::Model::load(model);
+            if (!m) {
+                std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
+                return 1;
+            }
+            pk::Transcription tr = m->transcribe_path_with_timestamps(input, dec);
+            for (const pk::Word& w : tr.words)
+                std::printf("%.2f-%.2f  %s  (%.2f)\n", w.start, w.end,
+                            w.text.c_str(), w.conf);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "transcribe failed: %s\n", e.what());
+            return 1;
+        }
+        return 0;
     }
 
     std::string text;
@@ -341,7 +416,7 @@ int main(int argc, char** argv) {
         "usage:\n"
         "  parakeet-cli info <model.gguf>\n"
         "  parakeet-cli transcribe --model <model.gguf> --input <wav> "
-        "[--decoder ctc|tdt] [--stream]\n"
+        "[--decoder ctc|tdt] [--stream] [--timestamps] [--json]\n"
         "  parakeet-cli quantize <in.gguf> <out.gguf> "
         "<q4_0|q5_0|q8_0|q4_k|q5_k|q6_k>\n");
     return 2;

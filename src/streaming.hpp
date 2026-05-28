@@ -4,6 +4,8 @@
 #include "prediction.hpp"
 #include "joint.hpp"
 #include "rnnt.hpp"
+#include "decode_types.hpp"
+#include "transcription.hpp"
 #include <functional>
 #include <memory>
 #include <string>
@@ -100,6 +102,14 @@ public:
     // Move out all EOU/EOB events collected so far (drains the queue).
     std::vector<EouEvent> drain_events();
 
+    // Move out the WORDS finalized since the previous drain_words() call, with
+    // per-word start/end (seconds) and 'min'-aggregate confidence (matching the
+    // offline pk::group_words / NeMo timestamps=True convention). A word is
+    // finalized when the NEXT `▁`-token (word-start marker) arrives; the final
+    // open word is flushed by finalize(). EOU/EOB specials are NOT words (they
+    // surface via drain_events()). Drains the returned-words queue.
+    std::vector<Word> drain_words();
+
     // Streaming chunk schedule (delegated from the encoder), so the caller can
     // window the mel exactly like test_streaming_encoder.
     int chunk_size_first() const { return enc_.chunk_size_first(); }
@@ -134,6 +144,25 @@ private:
 
     bool last_chunk_had_eou_ = false;
     std::vector<EouEvent> events_;
+
+    // Per-word timestamp accumulation. `word_tokens_` holds the per-token
+    // TokenInfo (absolute frame, conf, span) for the NON-SPECIAL tokens emitted
+    // so far, in emission order — the same input pk::group_words consumes
+    // offline. We regroup the whole accumulated sequence after each chunk and
+    // surface words that are now FINAL (followed by a later word-start, so their
+    // text + end-offset can't change). `words_finalized_` counts how many of the
+    // regrouped words are already considered final; `words_taken_` how many have
+    // been handed out by drain_words(). finalize() flushes the trailing word.
+    std::vector<TokenInfo> word_tokens_;
+    std::vector<Word> words_;       // last regrouping of word_tokens_
+    size_t words_finalized_ = 0;    // # of words_ that are final (safe to emit)
+    size_t words_taken_ = 0;        // # of words already returned by drain_words()
+    float frame_sec_f_ = 0.0f;      // frame_sec as float (group_words uses float)
+
+    // Regroup word_tokens_ into words_ and advance words_finalized_ to all but
+    // the last (still-open) word — flush_all=true (finalize) makes every word
+    // final, including the trailing one.
+    void regroup_words(bool flush_all);
 };
 
 // Drive a StreamingSession over a whole 16 kHz mono PCM clip in the model's
@@ -145,8 +174,9 @@ private:
 // encoder/decoder caches reproduce NeMo's streaming output EXACTLY.
 //
 // `on_chunk` (optional) is invoked after each chunk with the newly-finalized
-// text (<EOU>/<EOB> stripped) and the events emitted in that chunk — for the
-// CLI's incremental printing. The final stripped transcript is sess.text().
+// text (<EOU>/<EOB> stripped), the events emitted in that chunk, and the WORDS
+// finalized in that chunk (start/end/conf) — for the CLI's incremental printing.
+// The final stripped transcript is sess.text().
 //
 // This is the authoritative full-clip driver the streaming C-API uses on
 // finalize and the CLI uses for --stream. It does not buffer PCM incrementally;
@@ -157,7 +187,8 @@ void run_stream_over_pcm(
     StreamingSession& sess, const ModelLoader& ml,
     const std::vector<float>& pcm16k,
     const std::function<void(const std::string& new_text,
-                             const std::vector<EouEvent>& chunk_events)>& on_chunk
+                             const std::vector<EouEvent>& chunk_events,
+                             const std::vector<Word>& chunk_words)>& on_chunk
         = nullptr);
 
 } // namespace pk

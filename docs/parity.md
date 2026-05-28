@@ -561,3 +561,76 @@ PARAKEET_TEST_BASELINE_EOU=/tmp/baseline_eou.gguf \
 PARAKEET_TEST_BASELINE_EOU_STREAM=/tmp/baseline_eou_stream.gguf \
 ctest --test-dir build -R "test_capi_stream|test_streaming" --output-on-failure
 ```
+
+## Timestamps + confidence (vs NeMo `transcribe(timestamps=True)`, `max_prob`)
+
+Per-token and per-word **timestamps** and **confidence** match NeMo's
+`transcribe(timestamps=True, return_hypotheses=True)` with the decoding config's
+confidence method set to `max_prob` (the rescaled `(N·p_max − 1)/(N − 1)` form,
+α = 1.0, over the same logit slice NeMo log-softmaxes; N = vocab + 1 incl. blank).
+Validated on `tests/fixtures/speech.wav` + `nvidia/parakeet-tdt_ctc-110m` for
+**both** the TDT and CTC heads, against `/tmp/baseline_ts.gguf` (dumped by
+`scripts/gen_nemo_baseline.py`).
+
+| Quantity | TDT head | CTC head | Tolerance |
+| --- | --- | --- | --- |
+| per-token id / frame | exact | exact | exact |
+| per-token confidence | ≤5e-6 | ≤5e-6 | < 1e-3 |
+| word text (all 23 words) | exact | exact | exact |
+| word start / end | **0.0 s** diff | **0.0 s** diff | ≤ frame_sec (1 frame) |
+| word confidence (`min` aggregate) | ≤5e-6 | ≤5e-6 | < 1e-3 |
+
+`frame_sec = hop_length × subsampling_factor / sample_rate = 0.08 s/frame` here.
+Word start = `first_token.frame × frame_sec`; word end =
+`(last_token.frame + span) × frame_sec` (TDT span = predicted duration; CTC span =
+the next collapsed token's start − this token's start, i.e. NeMo's run-length
+end-offset). Words are grouped on the SentencePiece `▁` (U+2581) word-start
+marker with NeMo's punctuation-attachment + `_refine_timestamps` rules
+(`pk::group_words`, `src/transcription.cpp`).
+
+### Surfaces
+
+- **`pk::Model::transcribe_with_timestamps` / `transcribe_path_with_timestamps`**
+  → `pk::Transcription{text, words[], tokens[]}`.
+- **C-API** `parakeet_capi_transcribe_path_json(ctx, wav, decoder)` → malloc'd
+  JSON `{"text":..,"words":[{"w","start","end","conf"}],"tokens":[{"id","t","conf"}]}`
+  (times %.3f s, conf %.4f; no-throw boundary; freed by
+  `parakeet_capi_free_string`; exported from `libparakeet.so`, verified via
+  `nm -D`).
+- **CLI** `parakeet-cli transcribe --timestamps` (one `<start>-<end>  <word>
+  (<conf>)` line per word) and `--json` (the JSON above).
+- **Streaming** `pk::StreamingSession::drain_words()` surfaces finalized
+  `pk::Word`s as they complete (alongside `drain_events()`); the CLI
+  `--stream --timestamps` prints per-word times as words finalize.
+
+### Regression test
+
+- `tests/test_timestamps.cpp` (`test_timestamps`) — token + word
+  timestamps/confidence vs NeMo for both heads (`PARAKEET_TEST_GGUF` +
+  `PARAKEET_TEST_BASELINE_TS`).
+- `tests/test_capi_timestamps.cpp` (`test_capi_timestamps`) — the C-API JSON:
+  `"text"` == the NeMo TDT transcript, 23 words, `words[0]` == `Well,` with
+  start ≈ 0.48 s and a non-empty `"tokens"` array. Skips (77) unless
+  `PARAKEET_TEST_GGUF` is set.
+
+Reproduce:
+
+```bash
+# NeMo timestamp + max_prob confidence baseline:
+.venv/bin/python scripts/gen_nemo_baseline.py   # -> /tmp/baseline_ts.gguf (see script)
+
+# CLI:
+./build/examples/cli/parakeet-cli transcribe \
+    --model /tmp/pk110m.gguf --input tests/fixtures/speech.wav --timestamps
+# -> 0.48-0.64  Well,  (0.79)
+#    0.80-0.88  I  (1.00)
+#    ...
+./build/examples/cli/parakeet-cli transcribe \
+    --model /tmp/pk110m.gguf --input tests/fixtures/speech.wav --json
+# -> {"text":"Well, I don't ...","words":[{"w":"Well,","start":0.480,...}],"tokens":[...]}
+
+# ctest:
+PARAKEET_TEST_GGUF=/tmp/pk110m.gguf \
+PARAKEET_TEST_BASELINE_TS=/tmp/baseline_ts.gguf \
+ctest --test-dir build -R "test_timestamps|test_capi_timestamps" --output-on-failure
+```

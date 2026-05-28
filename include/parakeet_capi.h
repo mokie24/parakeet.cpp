@@ -44,6 +44,23 @@ char* parakeet_capi_transcribe_path(parakeet_ctx* ctx, const char* wav_path,
 char* parakeet_capi_transcribe_pcm(parakeet_ctx* ctx, const float* samples,
                                    int n_samples, int sample_rate, int decoder);
 
+// Transcribe a WAV file returning a malloc'd UTF-8 JSON document with per-word
+// and per-token timestamps + confidence (matching NeMo timestamps=True and the
+// 'max_prob' confidence method). `decoder` is as in
+// parakeet_capi_transcribe_path. The JSON shape is:
+//
+//   {"text":"...",
+//    "words":[{"w":"...","start":0.480,"end":0.640,"conf":0.9100}, ...],
+//    "tokens":[{"id":123,"t":0.480,"conf":0.9100}, ...]}
+//
+// where "start"/"end"/"t" are seconds (3 decimals) and "conf" is the
+// confidence in (0,1] (4 decimals). The "w"/"text" strings are JSON-escaped
+// (", \\, and control chars). On success returns the malloc'd string (free with
+// parakeet_capi_free_string); on error returns NULL and sets the context's last
+// error.
+char* parakeet_capi_transcribe_path_json(parakeet_ctx* ctx, const char* wav_path,
+                                         int decoder);
+
 // ---------------------------------------------------------------------------
 // Streaming API (cache-aware streaming RNN-T, e.g. the EOU model
 // nvidia/parakeet_realtime_eou_120m-v1). The stream session buffers incoming

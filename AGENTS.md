@@ -192,9 +192,14 @@ The binary is at `build/examples/cli/parakeet-cli`.
 
 ```
 parakeet-cli info <model.gguf>
-parakeet-cli transcribe --model <model.gguf> --input <audio.wav> [--decoder ctc|tdt]
+parakeet-cli transcribe --model <model.gguf> --input <audio.wav> [--decoder ctc|tdt] [--stream] [--timestamps] [--json]
 parakeet-cli quantize <in.gguf> <out.gguf> <type>
 ```
+
+`--timestamps` prints one `<start>-<end>  <word>  (<conf>)` line per word (also
+works with `--stream`, where words print as they finalize); `--json` prints the
+`parakeet_capi_transcribe_path_json` document (text + per-word/per-token
+timestamps + confidence).
 
 ## C-API and LocalAI integration
 
@@ -211,6 +216,7 @@ parakeet_capi_load
 parakeet_capi_free
 parakeet_capi_transcribe_path
 parakeet_capi_transcribe_pcm
+parakeet_capi_transcribe_path_json   # text + per-word/per-token timestamps + confidence as JSON
 parakeet_capi_free_string
 parakeet_capi_last_error
 # streaming (cache-aware EOU model parakeet_realtime_eou_120m-v1):
@@ -219,6 +225,15 @@ parakeet_capi_stream_feed       # 16k mono f32 PCM -> newly-finalized text; *eou
 parakeet_capi_stream_finalize   # flush the end-of-stream tail
 parakeet_capi_stream_free
 ```
+
+`parakeet_capi_transcribe_path_json(ctx, wav, decoder)` returns malloc'd UTF-8
+JSON `{"text":..,"words":[{"w","start","end","conf"}],"tokens":[{"id","t","conf"}]}`
+(times in seconds, conf in `(0,1]`), built from
+`pk::Model::transcribe_path_with_timestamps`.  Confidence is NeMo's `max_prob`
+method — the rescaled softmax probability of the emitted (argmax) token over the
+same logit slice NeMo log-softmaxes (`conf = (N·p_max − 1)/(N − 1)`, N = classes);
+per-word `conf` is the `min` aggregate over the word's tokens.  Word offsets +
+confidence match NeMo `transcribe(timestamps=True)` exactly (see `docs/parity.md`).
 
 `parakeet_capi_abi_version` returns an integer that LocalAI can check for
 compatibility; bump it on any breaking change to the above signatures or
@@ -233,8 +248,13 @@ chunk whose right context is incomplete, the trailing `<EOU>` is dropped exactly
 as NeMo does).  Internally these wrap `pk::StreamingSession` (`src/streaming.*`):
 `feed_mel_chunk` (token ids, used by `test_streaming_decode`), `take_new_text`,
 `drain_events` (`pk::EouEvent{token,is_eob,encoder_frame,time_sec}`),
+`drain_words` (`pk::Word{text,start,end,conf}` for words finalized since the last
+drain — a word finalizes when the next `▁`-token arrives, the last word on
+`finalize()`; reuses the offline `pk::group_words` grouping),
 `last_chunk_had_eou`, `finalize`.  The CLI `--stream` path uses
-`pk::run_stream_over_pcm` (full-clip mel + the model's chunk schedule).
+`pk::run_stream_over_pcm` (full-clip mel + the model's chunk schedule); its
+`on_chunk` callback now also receives the per-chunk finalized `pk::Word`s, which
+`--stream --timestamps` prints.
 
 ## Dumping NeMo baselines
 
