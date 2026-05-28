@@ -54,6 +54,13 @@ bool ModelLoader::load(const std::string& path){
           size_t n = gguf_get_arr_n(gguf_,id);
           const int32_t* a = (const int32_t*)gguf_get_arr_data(gguf_,id);
           cfg_.tdt_durations.assign(a, a+n); } }
+    // tokenizer pieces STRING array
+    { int64_t id = gguf_find_key(gguf_, "parakeet.tokenizer.pieces");
+      if(id>=0 && gguf_get_arr_type(gguf_,id)==GGUF_TYPE_STRING){
+          size_t n = gguf_get_arr_n(gguf_,id);
+          cfg_.tokenizer_pieces.resize(n);
+          for(size_t i=0;i<n;++i)
+              cfg_.tokenizer_pieces[i] = gguf_get_arr_str(gguf_,id,i); } }
     // tensors
     const int64_t nt = gguf_get_n_tensors(gguf_);
     for(int64_t i=0;i<nt;++i){ const char* nm = gguf_get_tensor_name(gguf_,i);

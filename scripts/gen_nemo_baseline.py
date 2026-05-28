@@ -220,10 +220,17 @@ def main():
     logits = _squeeze(cap["ctc_logits"])  # [T', V+1]
     ids = (logits.argmax(-1) if logits.ndim == 2 else logits.argmax(0)).astype(np.int32)
 
+    # Tokenizer detok fixture: a small hand-picked set of regular BPE ids
+    # (avoid id=0 <unk> and blank_id=1024 which is beyond vocab).
+    detok_ids = np.array([10, 25, 100, 3, 7], dtype=np.int32)
+    detok_text = m.tokenizer.ids_to_text(detok_ids.tolist())
+
     w = gguf.GGUFWriter(args.output, "parakeet-baseline")
     for k, v in cap.items():
         w.add_tensor(k, _squeeze(v))
     w.add_tensor("ctc_argmax_ids", np.ascontiguousarray(ids))
+    w.add_tensor("detok_ids", detok_ids)
+    w.add_string("baseline.detok_text", detok_text)
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
@@ -231,7 +238,9 @@ def main():
 
     shapes = {k: tuple(_squeeze(v).shape) for k, v in cap.items()}
     shapes["ctc_argmax_ids"] = tuple(ids.shape)
+    shapes["detok_ids"] = tuple(detok_ids.shape)
     print("baseline tensors:", shapes)
+    print(f"baseline.detok_text: {repr(detok_text)}")
     print(f"wrote {args.output}: tensors={len(shapes)} (dither=0.0, explicit forward)")
 
 

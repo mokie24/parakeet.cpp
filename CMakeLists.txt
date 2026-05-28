@@ -34,7 +34,8 @@ set(PARAKEET_SRC
     src/conformer.cpp
     src/pos_enc.cpp
     src/encoder.cpp
-    src/ctc_decoder.cpp)
+    src/ctc_decoder.cpp
+    src/tokenizer.cpp)
 
 if(PARAKEET_SHARED)
   add_library(parakeet SHARED ${PARAKEET_SRC})

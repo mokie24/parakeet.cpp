@@ -32,6 +32,7 @@ public:
     ~ModelLoader();
     bool load(const std::string& path);
     const ParakeetConfig& config() const { return cfg_; }
+    const std::vector<std::string>& tokenizer_pieces() const { return cfg_.tokenizer_pieces; }
     ggml_tensor* tensor(const std::string& name) const; // nullptr if absent
     ggml_context* ggml_ctx() const { return ctx_; }
 private:
