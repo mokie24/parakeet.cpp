@@ -25,29 +25,49 @@ static int cmd_info(const char* path) {
     return 0;
 }
 
-// parakeet-cli transcribe --model <m.gguf> --input <wav> -> prints transcript.
+// parakeet-cli transcribe --model <m.gguf> --input <wav> [--decoder ctc|tdt]
+// Prints the transcript. Default decoder is chosen by arch (TDT for transducer
+// archs, CTC for ctc arch — matching NeMo's cur_decoder default).
 static int cmd_transcribe(int argc, char** argv) {
-    std::string model, input;
+    std::string model, input, decoder_str;
     for (int i = 0; i < argc; ++i) {
         if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             model = argv[++i];
         } else if (std::strcmp(argv[i], "--input") == 0 && i + 1 < argc) {
             input = argv[++i];
+        } else if (std::strcmp(argv[i], "--decoder") == 0 && i + 1 < argc) {
+            decoder_str = argv[++i];
         }
     }
     if (model.empty() || input.empty()) {
-        std::fprintf(stderr, "usage: parakeet-cli transcribe --model <m.gguf> --input <wav>\n");
+        std::fprintf(stderr,
+            "usage: parakeet-cli transcribe --model <m.gguf> --input <wav> "
+            "[--decoder ctc|tdt]\n");
         return 2;
     }
-    char* out = nullptr;
-    int rc = parakeet_transcribe_file(model.c_str(), input.c_str(), &out);
-    if (rc != 0) {
-        std::fprintf(stderr, "transcribe failed (code %d): model=%s input=%s\n",
-                     rc, model.c_str(), input.c_str());
+
+    // Resolve the decoder selector.
+    pk::Decoder dec = pk::Decoder::kDefault;
+    if (!decoder_str.empty()) {
+        if (decoder_str == "ctc") {
+            dec = pk::Decoder::kCTC;
+        } else if (decoder_str == "tdt") {
+            dec = pk::Decoder::kTDT;
+        } else {
+            std::fprintf(stderr, "parakeet-cli: unknown --decoder '%s' (want ctc|tdt)\n",
+                         decoder_str.c_str());
+            return 2;
+        }
+    }
+
+    std::string text;
+    try {
+        text = pk::transcribe(model, input, dec);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "transcribe failed: %s\n", e.what());
         return 1;
     }
-    std::printf("%s\n", out);
-    parakeet_free_string(out);
+    std::printf("%s\n", text.c_str());
     return 0;
 }
 
@@ -58,6 +78,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
         "usage:\n"
         "  parakeet-cli info <model.gguf>\n"
-        "  parakeet-cli transcribe --model <model.gguf> --input <wav>\n");
+        "  parakeet-cli transcribe --model <model.gguf> --input <wav> "
+        "[--decoder ctc|tdt]\n");
     return 2;
 }
