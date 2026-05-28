@@ -86,11 +86,22 @@ Notes:
 - All stage diffs are well within the plan's tolerances and the greedy argmax /
   collapse is unaffected, which is why the end-to-end transcript is exact.
 
+## Phase 2 — transducer core parity (max abs diff vs NeMo)
+
+| Component | max\|diff\| | tolerance |
+| --- | --- | --- |
+| prediction net (embedding + 1-layer LSTM) | 1.5e-06 | 2e-3 |
+| joint network (enc/pred proj → ReLU → linear, raw logits) | 1.1e-05 | 5e-3 |
+| composed pred→joint (integration) | 1.3e-05 | 5e-3 |
+
+- The joint emits **raw** logits `[T, U, 1030]` = 1024 vocab + 1 blank + 5 TDT
+  durations `[0,1,2,3,4]`; the token/duration split + separate log_softmax is a
+  Phase 3 (greedy) concern.
+- The prediction net prepends a literal zero SOS step (`add_sos`), so 4 input
+  ids → 5 hidden states. PyTorch LSTM gate order `[i,f,g,o]`, both biases summed.
+
 ## Test suite status
 
 `ctest --test-dir build --output-on-failure` (with `PARAKEET_TEST_GGUF` and
-`PARAKEET_TEST_BASELINE` exported): all 15 tests pass —
-`test_smoke`, `test_audio_io`, `test_model_loader`, `test_fft`, `test_mel`,
-`test_subsampling`, `test_relpos_attention`, `test_conformer`, `test_encoder`,
-`test_ctc`, `test_tokenizer`, `test_transcribe`, `test_transcribe_speech`,
-`check_convert`, `check_baseline`.
+`PARAKEET_TEST_BASELINE` exported): all 18 tests pass — the 15 Phase 0/1 tests
+plus `test_prediction`, `test_joint`, `test_transducer_core`.
