@@ -275,10 +275,12 @@ WAV → audio_io(16k mono) → mel[80,T] → subsampling(÷8) → FastConformer 
 - **Mel filterbank tensor** lifted straight from the checkpoint buffer
   `preprocessor.featurizer.fb` (80×(n_fft/2+1)) into the GGUF — exact mel parity
   with no librosa recompute. The Hann `window` buffer is available the same way.
-- **Tensor naming** mirrors NeMo state dict with a short prefix map
-  (`encoder.*`→`enc.*`, `ctc_decoder.*`→`ctc.*`, prediction→`pred.*`,
-  joint→`joint.*`); documented in `docs/conversion.md`. `--strict` flags
-  unmapped keys.
+- **Tensor naming** keeps the NeMo `state_dict` keys **verbatim** (no remap),
+  for a faithful 1:1 port and a trivial, drift-free converter — e.g.
+  `encoder.layers.<i>.…`, `decoder.prediction.…`, `joint.{enc,pred,joint_net}.…`,
+  `ctc_decoder.decoder_layers.0.…`, plus the lifted `preprocessor.featurizer.{fb,window}`
+  buffers. The C++ loader looks tensors up by their verbatim NeMo names.
+  Documented in `docs/conversion.md`.
 - **Quant:** 2D weights above block threshold quantized; norms, biases,
   embeddings, `pos_bias_u/v`, and **conv kernels stay F32** (conv path casts to
   f16 — quantized conv kernels would silently corrupt). K-quants via CLI
