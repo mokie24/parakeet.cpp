@@ -89,6 +89,61 @@ SentencePiece BPE, vocab ≈ 1024. Inference only needs id→piece detokenizatio
 (map `▁`→space). Vocab pieces are stored in the GGUF; no SentencePiece runtime
 dependency.
 
+## 2.1 Variant families & published checkpoints
+
+All Parakeet variants share the FastConformer encoder; they differ only in the
+decoder family. Two axes matter: the **decoder family** (what we implement) and
+the **published checkpoint** (what we convert and validate against).
+
+### Decoder families (implementation)
+
+| Family | NeMo class | Decoder modules | Joint output | Greedy decoding |
+| --- | --- | --- | --- | --- |
+| CTC | `EncDecCTCModelBPE` | `ConvASRDecoder` (1×1 conv) | vocab+1 | argmax + collapse-blank |
+| RNNT | `EncDecRNNTBPEModel` | `RNNTDecoder` (LSTM prednet) + `RNNTJoint` | vocab+1 | label-loop; advance T on blank |
+| TDT | **same** `EncDecRNNTBPEModel` | RNNTDecoder + RNNTJoint **+ duration logits** | vocab+1+D | label-loop; advance T by predicted duration |
+| Hybrid | `EncDecHybridRNNTCTCBPEModel` | encoder + (RNNT/TDT decoder+joint) **+ aux `ctc_decoder`** | both heads | either head |
+
+TDT reuses the RNNT class and modules wholesale; the only deltas are the joint's
+`num_extra_outputs = len(durations)` duration logits and the duration-aware
+greedy loop. So **Phase 3 ≈ Phase 2 + duration head + duration-skip**. Hybrid
+checkpoints carry both an RNNT/TDT head and an aux CTC head on one shared
+encoder — a single checkpoint can be decoded either way.
+
+The prediction net is `RNNTDecoder` (LSTM, `pred_rnn_layers`/`pred_hidden`) for
+the 0.6b/1.1b line; a `StatelessTransducerDecoder` variant also exists. The
+loader selects via `decoder._target_`.
+
+### Converter arch detection → `parakeet.arch`
+
+```
+1. cfg.aux_ctc present                       → hybrid_tdt_ctc  (if loss == 'tdt')
+                                               else hybrid_rnnt_ctc
+2. else cfg.joint present:
+     decoding.durations non-empty
+     or joint.num_extra_outputs > 0          → tdt
+     else                                    → rnnt
+3. else (decoder._target_ == ConvASRDecoder) → ctc
+```
+
+### Published checkpoints (HF `nvidia/…`) → family → phase
+
+| Checkpoint | Family | Phase |
+| --- | --- | --- |
+| `parakeet-ctc-0.6b`, `parakeet-ctc-1.1b` | CTC | 1 |
+| `parakeet-rnnt-0.6b`, `parakeet-rnnt-1.1b` | RNNT | 2 |
+| `parakeet-tdt-1.1b`, `parakeet-tdt-0.6b` (v1) | TDT | 3 |
+| `parakeet-tdt-0.6b-v2` (EN, **north star**) | TDT | 3 |
+| `parakeet-tdt-0.6b-v3` (multilingual, 25 EU langs) | TDT | 3 (≈ free once TDT lands — only a larger BPE vocab) |
+| `parakeet-tdt_ctc-110m`, `parakeet-tdt_ctc-1.1b` | Hybrid TDT+CTC | 3 (cross-check: both heads in one ckpt) |
+| `parakeet_realtime_eou_120m-v1` | streaming + EOU | 5 (deferred) |
+
+### Tensor-name prefixes per family
+
+| | Shared | CTC head | Prediction net | Joint | Aux CTC (hybrid) |
+| --- | --- | --- | --- | --- | --- |
+| state_dict prefix | `encoder.*` | `decoder.*` | `decoder.prediction.*` | `joint.{enc,pred,joint_net}.*` | `ctc_decoder.*` |
+
 ## 3. Scope & phasing
 
 The FastConformer encoder is the shared backbone, built and proven first; then
@@ -104,6 +159,8 @@ each decoder is layered on.
   Token/WER parity. Anchor: `nvidia/parakeet-rnnt-0.6b`.
 - **Phase 3 — TDT (north star):** duration head + duration-aware greedy loop →
   `nvidia/parakeet-tdt-0.6b-v2` works. Token/WER parity. Headline deliverable.
+  Once TDT lands, the multilingual `-v3` (only a larger BPE vocab) and the
+  hybrid `tdt_ctc` checkpoints (both heads on one encoder) come nearly for free.
 - **Phase 4 — Productionize:** quantization (Q8_0 / Q4_K …), flat C-API, LocalAI
   backend, HF model publishing, full CI.
 - **Phase 5 — Streaming (deferred):** cache-aware chunked attention + conv /
@@ -172,7 +229,8 @@ WAV → audio_io(16k mono) → mel[80,T] → subsampling(÷8) → FastConformer 
 ## 7. GGUF schema & converter
 
 - **GGUF v3, fully metadata-driven.** KV: `parakeet.arch`
-  (`fastconformer_ctc`/`_rnnt`/`_tdt`), encoder dims (d_model, n_layers, n_heads,
+  (`ctc` / `rnnt` / `tdt` / `hybrid_rnnt_ctc` / `hybrid_tdt_ctc`, per the
+  detection logic in §2.1), encoder dims (d_model, n_layers, n_heads,
   ff_dim, conv_kernel, subsampling_factor, xscaling), preprocessor params,
   decoder params (pred_hidden, pred_layers, joint_hidden, durations list,
   blank_id, vocab_size), tokenizer vocab pieces.
@@ -254,10 +312,11 @@ tensors. This is a hard prerequisite for Phase 1+, set up in Phase 0.
 ## 12. Out of scope (v1)
 
 - Beam search / external LM fusion (greedy only initially).
-- Cache-aware streaming (Phase 5).
+- Cache-aware streaming + end-of-utterance detection — e.g.
+  `parakeet_realtime_eou_120m-v1` (Phase 5).
 - Training / fine-tuning.
 - Batch size > 1 (always B=1).
-- AED / multitask (Canary) models.
+- AED / multitask (Canary) models — different architecture entirely.
 
 ## 13. Reference
 
