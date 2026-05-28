@@ -1,6 +1,7 @@
 #pragma once
 #include "parakeet.h"          // pk::Decoder
 #include "model_loader.hpp"
+#include "transcription.hpp"   // pk::Transcription
 
 #include <memory>
 #include <string>
@@ -34,6 +35,19 @@ public:
     std::string transcribe_path(const std::string& wav_path,
                                 Decoder decoder = Decoder::kDefault) const;
 
+    // Transcribe raw mono float PCM, returning the flat text plus per-word and
+    // per-token timestamps + confidence (matching NeMo timestamps=True +
+    // 'max_prob' confidence). If `sample_rate != 16000` the audio is linearly
+    // resampled to 16 kHz first. Throws std::runtime_error on failure.
+    Transcription transcribe_with_timestamps(
+        const std::vector<float>& pcm, int sample_rate,
+        Decoder decoder = Decoder::kDefault) const;
+
+    // Convenience: transcribe a WAV file with timestamps + confidence.
+    Transcription transcribe_path_with_timestamps(
+        const std::string& wav_path,
+        Decoder decoder = Decoder::kDefault) const;
+
     const ParakeetConfig& config() const { return loader_.config(); }
 
     // The underlying loaded GGUF. Exposed so the streaming C-API can build a
@@ -52,6 +66,12 @@ private:
     // loads the WAV first).
     std::string transcribe_16k(const std::vector<float>& pcm16k,
                                Decoder decoder) const;
+
+    // Core orchestration for the timestamps path: 16 kHz mono PCM -> full
+    // Transcription (text + per-token TokenInfo + grouped words). Shared by the
+    // two timestamp entry points.
+    Transcription transcribe_16k_with_timestamps(
+        const std::vector<float>& pcm16k, Decoder decoder) const;
 
     ModelLoader loader_;
 };

@@ -25,6 +25,7 @@ pk_add_test(test_joint)
 pk_add_test(test_transducer_core)
 pk_add_test(test_tdt_greedy)
 pk_add_test(test_timestamps_tokens)
+pk_add_test(test_timestamps)
 pk_add_test(test_tokenizer)
 pk_add_test(test_transcribe)
 pk_add_test(test_transcribe_speech)
@@ -42,7 +43,7 @@ set_tests_properties(test_model_loader test_mel test_subsampling test_relpos_att
                      test_streaming_encoder test_ctc test_prediction
                      test_prediction_step
                      test_joint test_transducer_core test_tdt_greedy
-                     test_timestamps_tokens test_tokenizer test_transcribe
+                     test_timestamps_tokens test_timestamps test_tokenizer test_transcribe
                      test_transcribe_speech test_transcribe_tdt test_transcribe_0_6b
                      test_transcribe_ctc test_transcribe_rnnt test_transcribe_eou
                      test_streaming_decode test_streaming_mel test_capi test_capi_stream
@@ -53,6 +54,7 @@ set_tests_properties(test_mel test_subsampling test_relpos_attention test_confor
                      test_ctc test_prediction test_prediction_step
                      test_joint
                      test_transducer_core test_tdt_greedy test_timestamps_tokens
+                     test_timestamps
                      test_tokenizer test_transcribe
                      test_transcribe_speech test_transcribe_tdt test_transcribe_0_6b
                      test_transcribe_ctc test_transcribe_rnnt test_transcribe_eou

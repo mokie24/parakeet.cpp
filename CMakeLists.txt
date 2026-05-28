@@ -44,7 +44,8 @@ set(PARAKEET_SRC
     src/tdt.cpp
     src/rnnt.cpp
     src/tokenizer.cpp
-    src/search.cpp)
+    src/search.cpp
+    src/transcription.cpp)
 
 if(PARAKEET_SHARED)
   add_library(parakeet SHARED ${PARAKEET_SRC})
