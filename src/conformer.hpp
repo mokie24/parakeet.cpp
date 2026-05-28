@@ -1,5 +1,6 @@
 #pragma once
 #include "model_loader.hpp"
+#include <string>
 #include <vector>
 namespace pk {
 
@@ -16,10 +17,16 @@ namespace pk {
 // feed_forwardN  = linear2(silu(linear1(x))).
 // conv (ConformerConvolution, operates on [d_model, T]):
 //   pointwise_conv1 (d->2d, k=1) -> GLU(dim=channel) -> [zero padded time pos]
-//   -> depthwise_conv (d->d, k=conv_kernel, groups=d, symmetric pad (k-1)/2)
-//   -> batch_norm (inference affine from running stats, eps 1e-5)
-//   -> SiLU -> pointwise_conv2 (d->d, k=1).
-// All norm_* are LayerNorm (eps 1e-5). MHSA reuses pk::RelPosAttention.
+//   -> depthwise_conv (d->d, k=conv_kernel, groups=d)
+//   -> norm -> SiLU -> pointwise_conv2 (d->d, k=1).
+// Two conv-module variants, selected by config (byte-identical gating):
+//   * conv_norm_type=batch_norm (offline models): inference affine fold from
+//     running stats (eps 1e-5); symmetric depthwise pad (k-1)/2 each side.
+//   * conv_norm_type=layer_norm (streaming models, e.g. the EOU model): LayerNorm
+//     over the channel dim per time-frame (eps 1e-5), gamma/beta read from
+//     conv.batch_norm.{weight,bias} (NeMo always names the attr `batch_norm`).
+//     conv_causal=true -> causal depthwise pad (left k-1, right 0).
+// All norm_* (outside conv) are LayerNorm (eps 1e-5). MHSA reuses pk::RelPosAttention.
 //
 // Layout convention (matches the rest of the port and the baseline GGUF):
 //   x       row-major [T, d_model]      (d_model fastest)
@@ -49,6 +56,15 @@ public:
                            std::vector<float>& out,
                            std::vector<float>& conv_out) const;
 
+    // Run JUST the ConformerConvolution sub-module (everything AFTER norm_conv:
+    // pointwise_conv1 -> GLU -> [pad_mask] -> depthwise_conv -> norm -> SiLU ->
+    // pointwise_conv2) on `conv_in` (= norm_conv(residual), row-major [T,d_model]).
+    // Test entry point for validating the conv module — including the layer_norm
+    // and causal-conv variants — in ISOLATION from the surrounding attention.
+    // `out` is row-major [T, d_model].
+    void conv_module_forward(const std::vector<float>& conv_in, int T,
+                             int valid_len, std::vector<float>& out) const;
+
 private:
     const ModelLoader& ml_;
     int layer_idx_;
@@ -56,6 +72,8 @@ private:
     int n_heads_;
     int ff_dim_;
     int conv_kernel_;
+    std::string conv_norm_type_;  // "batch_norm" (offline) or "layer_norm" (streaming)
+    bool conv_causal_ = false;    // causal depthwise conv pad (left k-1, right 0)
 };
 
 } // namespace pk

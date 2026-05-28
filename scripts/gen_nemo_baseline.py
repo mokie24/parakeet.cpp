@@ -94,8 +94,12 @@ head, e.g. ``nvidia/parakeet_realtime_eou_120m-v1``). When the model has no
 ``ctc_decoder`` the script dumps a smaller, RNNT-only baseline (the model's
 normal offline forward already applies limited-context + causal + layer_norm):
 
-* ``mel``, ``subsampling_out``, ``l0_conv_out``, ``enc_layer_0``,
-  ``encoder_out`` — the same encoder-stage tensors as above (from the hooks).
+* ``mel``, ``subsampling_out``, ``l0_conv_in``, ``l0_conv_out``,
+  ``enc_layer_0``, ``encoder_out`` — the same encoder-stage tensors as above
+  (from the hooks). ``l0_conv_in`` ``[T', d_model]`` is the INPUT fed into
+  ``layers[0].conv`` (= ``norm_conv(residual)``), captured via a forward-pre-hook;
+  it lets the C++ conv-module parity test exercise the conv sub-graph (layer_norm
+  + causal depthwise conv) in ISOLATION from the chunked attention.
 * ``rnnt_token_ids``  ``[L]`` int32   NeMo's RNNT greedy token-id sequence
                                       (``hyp.y_sequence``), INCLUDING the
                                       ``<EOU>``=1024 / ``<EOB>``=1025 special
@@ -220,6 +224,23 @@ def main():
             cap[name] = t.detach().cpu().float().numpy()
         return fn
 
+    def save_conv_in(name):
+        # Forward PRE-hook on layers[0].conv (ConformerConvolution): capture the
+        # INPUT to the conv module, i.e. norm_conv(residual). The conformer layer
+        # calls self.conv(x, pad_mask=..., cache=...) so x is the first positional
+        # arg (occasionally a kwarg). Squeeze to [T, d_model]. This lets the C++
+        # conv-module parity test exercise the conv sub-graph in ISOLATION
+        # (decoupled from the chunked attention, which is a later task).
+        def fn(mod, args, kwargs):
+            t = kwargs.get("x") if "x" in kwargs else (args[0] if args else None)
+            if not isinstance(t, torch.Tensor):
+                raise RuntimeError(
+                    f"baseline: could not capture {name}: conv input was not a "
+                    f"tensor (args={len(args)}, kwargs={sorted(kwargs)})"
+                )
+            cap[name] = t.detach().cpu().float().numpy()
+        return fn
+
     def submodule(path):
         """Resolve a dotted attribute path under ``m``; clear error if missing."""
         obj = m
@@ -253,6 +274,10 @@ def main():
         ),
         submodule("encoder.layers[0].self_attn").register_forward_hook(
             save("l0_attn_out")
+        ),
+        # conv module INPUT (norm_conv(residual)) + OUTPUT for isolated conv parity.
+        submodule("encoder.layers[0].conv").register_forward_pre_hook(
+            save_conv_in("l0_conv_in"), with_kwargs=True
         ),
         submodule("encoder.layers[0].conv").register_forward_hook(save("l0_conv_out")),
         m.encoder.layers[0].register_forward_hook(save("enc_layer_0")),
@@ -313,7 +338,8 @@ def main():
         # Required encoder-stage tensors for the offline-parity tests (Tasks 2-3):
         # mel, subsampling_out, l0_conv_out, enc_layer_0, encoder_out are already
         # captured by the hooks above. Write only those + the RNNT ground truth.
-        keep = {"mel", "subsampling_out", "l0_conv_out", "enc_layer_0", "encoder_out"}
+        keep = {"mel", "subsampling_out", "l0_conv_in", "l0_conv_out",
+                "enc_layer_0", "encoder_out"}
         w = gguf.GGUFWriter(args.output, "parakeet-baseline")
         shapes = {}
         for k in sorted(cap):
