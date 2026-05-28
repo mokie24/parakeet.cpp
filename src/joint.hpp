@@ -1,0 +1,54 @@
+#pragma once
+#include "model_loader.hpp"
+#include <vector>
+
+namespace pk {
+
+// RNN-Transducer joint network — NeMo RNNTJoint.
+//
+// Architecture (NeMo RNNTJoint.joint):
+//   enc_proj[t]  = joint.enc.weight  · enc[t]  + joint.enc.bias   (enc_hidden→joint_hidden)
+//   pred_proj[u] = joint.pred.weight · pred[u] + joint.pred.bias  (pred_hidden→joint_hidden)
+//   f[t,u]       = ReLU(enc_proj[t] + pred_proj[u])               (broadcast sum, ReLU on sum)
+//   logits[t,u]  = joint_net.2.weight · f[t,u] + joint_net.2.bias (joint_hidden→V_plus)
+//
+// Output logits are RAW (no log_softmax), shape [T, U, V_plus] row-major.
+// V_plus = vocab + 1 + num_durations  (full TDT output vector).
+//
+// enc input convention: row-major [T, enc_hidden], i.e. enc[t*enc_hidden + c].
+//   (The Encoder outputs channels-first [enc_hidden, T]; the caller must
+//    transpose before calling this function.)
+//
+// Tensors (verbatim NeMo names, ggml ne = reverse of torch):
+//   joint.enc.weight          ggml ne=[enc_hidden=512, joint_hidden=640]
+//   joint.enc.bias            ggml ne=[640]
+//   joint.pred.weight         ggml ne=[pred_hidden=640, joint_hidden=640]
+//   joint.pred.bias           ggml ne=[640]
+//   joint.joint_net.2.weight  ggml ne=[joint_hidden=640, V_plus=1030]
+//   joint.joint_net.2.bias    ggml ne=[V_plus=1030]
+class Joint {
+public:
+    explicit Joint(const ModelLoader& ml);
+
+    // enc:  row-major [T, enc_hidden],  enc[t*enc_hidden + c]
+    // pred: row-major [U, pred_hidden], pred[u*pred_hidden + h]
+    // logits out: row-major [T, U, V_plus], logits[t*U*V_plus + u*V_plus + v]
+    // V_plus = vocab + 1 + num_durations (written to the out param)
+    void forward(const std::vector<float>& enc,  int T, int enc_hidden,
+                 const std::vector<float>& pred, int U, int pred_hidden,
+                 std::vector<float>& logits, int& V_plus) const;
+
+    // V_plus = vocab_size + 1 + num_durations
+    int V_plus()       const { return V_plus_; }
+    int vocab_size()   const { return vocab_size_; }
+    int num_durations() const { return num_durations_; }
+
+private:
+    const ModelLoader& ml_;
+    int joint_hidden_;
+    int vocab_size_;
+    int num_durations_;
+    int V_plus_;
+};
+
+} // namespace pk
