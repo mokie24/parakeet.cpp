@@ -100,8 +100,89 @@ Notes:
 - The prediction net prepends a literal zero SOS step (`add_sos`), so 4 input
   ids → 5 hidden states. PyTorch LSTM gate order `[i,f,g,o]`, both biases summed.
 
+## Phase 3 — North-star validation (TDT end-to-end vs NeMo)
+
+The decisive Phase 3 deliverable: the real Parakeet-TDT models people use,
+transcribed by the full C++ TDT path (mel → FastConformer encoder → prediction
+net + joint → duration-aware greedy decode → BPE detokenize) and compared
+word-for-word against NeMo's TDT-head transcript of the same clip. All on
+`tests/fixtures/speech.wav` (LibriSpeech `2086-149220-0033`, English, ~7.4 s).
+NeMo 2.7.3, CPU, batch 1, deterministic greedy.
+
+### Model `info` (config read from the GGUF metadata)
+
+| Model | arch | d_model / layers / heads | mels | conv norm | xscaling | durations | vocab | pred LSTM layers |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `parakeet-tdt_ctc-110m` (TDT head) | `hybrid_tdt_ctc` | 512 / 17 / 8 | 80 | batch_norm | false | `[0,1,2,3,4]` | 1024 | 1 |
+| `parakeet-tdt-0.6b-v2` | `hybrid_tdt_ctc` | 1024 / 24 / 8 | 128 | batch_norm | false | `[0,1,2,3,4]` | 1024 | 2 |
+| `parakeet-tdt-0.6b-v3` | `hybrid_tdt_ctc` | 1024 / 24 / 8 | 128 | batch_norm | false | `[0,1,2,3,4]` | 8192 | 2 |
+
+(`xscaling` is **false** on all three — NeMo's FastConformer `xscale=None`. The
+0.6B checkpoints load in NeMo as `EncDecRNNTBPEModel`; the converter labels them
+`hybrid_tdt_ctc` because `cfg.aux_ctc` is present, and the C++ default routes to
+the TDT head either way, matching NeMo's default transducer transcription.)
+
+### NeMo vs C++ transcripts + WER
+
+| Model | NeMo (TDT) | C++ `parakeet-cli transcribe --decoder tdt` | WER |
+| --- | --- | --- | --- |
+| `parakeet-tdt_ctc-110m` | `Well, I don't wish to see it any more, observed Phoebe, turning away her eyes. It is certainly very like the old portrait.` | `Well, I don't wish to see it any more, observed Phoebe, turning away her eyes. It is certainly very like the old portrait.` | **0.0** |
+| `parakeet-tdt-0.6b-v2` | `Well, I don't wish to see it any more, observed Phebe, turning away her eyes. It is certainly very like the old portrait.` | `Well, I don't wish to see it any more, observed Phebe, turning away her eyes. It is certainly very like the old portrait.` | **0.0** |
+| `parakeet-tdt-0.6b-v3` | `Well, I don't wish to see it any more, observed Phoebe, turning away her eyes. It is certainly very like the old portrait.` | `Well, I don't wish to see it any more, observed Phoebe, turning away her eyes. It is certainly very like the old portrait.` | **0.0** |
+
+All three are **byte-for-byte identical** to NeMo (0 edits over 23 reference
+words). The only inter-model difference is the BPE spelling `Phebe` (v2 1024-token
+vocab) vs `Phoebe` (v3 8192-token vocab) — both faithfully reproduce their own
+tokenizer, exactly as NeMo does. This is the Phase 3 headline: the production
+`parakeet-tdt-0.6b-v2` and multilingual `-v3` transcribe real speech identically
+to NeMo through the C++/ggml port.
+
+Reproduce:
+
+```bash
+.venv/bin/python scripts/convert_parakeet_to_gguf.py \
+    --model nvidia/parakeet-tdt-0.6b-v2 --output /tmp/tdt06v2.gguf
+./build/examples/cli/parakeet-cli info /tmp/tdt06v2.gguf
+./build/examples/cli/parakeet-cli transcribe \
+    --model /tmp/tdt06v2.gguf --input tests/fixtures/speech.wav --decoder tdt
+# NeMo reference (TDT is the default head for this model):
+.venv/bin/python -c "from nemo.collections.asr.models import ASRModel; \
+m=ASRModel.from_pretrained('nvidia/parakeet-tdt-0.6b-v2'); \
+print(m.transcribe(['tests/fixtures/speech.wav'])[0].text)"
+```
+
+### Code changes the 0.6B models required (metadata-honoring, not special-cased)
+
+The 110m anchor (xscaling=False, 1-layer LSTM, conv/linear biases present) had
+matched NeMo, so two latent assumptions surfaced only on the larger checkpoints.
+The encoder output was already byte-exact on 0.6B-v2 (`enc_out` mean 1.80e-06,
+std 0.0763, range ±0.69 — identical to NeMo); the divergences were:
+
+1. **Optional Conv1d / Linear biases.** NeMo configures the FastConformer FFN
+   and attention `nn.Linear`s and the conv submodule's `Conv1d`s with
+   `bias=False` on `parakeet-tdt-0.6b-v2/-v3` (they are `bias=True` on the
+   110m). The C++ conformer/attention unconditionally fetched the `.bias`
+   tensors → null-deref / segfault. Fix: `src/conformer.cpp` and
+   `src/relpos_attention.cpp` now add the bias only when the tensor is actually
+   present in the checkpoint (`clone_weight_opt` / `ml.tensor(...)` guard).
+
+2. **Stacked prediction LSTM.** `parakeet.decoder.pred_rnn_layers = 2` on the
+   0.6B models (vs 1 on the 110m). The C++ `PredictionNet` ran only LSTM layer
+   `_l0`, ignoring `_l1`, producing a wrong prediction-net output and a garbage
+   transcript. Fix: `src/prediction.{hpp,cpp}` now read `pred_rnn_layers` from
+   the GGUF and run a true stacked LSTM (`PredState` carries per-layer `(h,c)`;
+   layer `l>0` consumes layer `l-1`'s hidden output), defaulting to 1 layer.
+
+Both fixes honor the GGUF metadata / actual tensors; no model is special-cased.
+Per-stage tensor parity (above) and the 110m end-to-end TDT/CTC transcripts are
+unchanged (all earlier ctests still pass).
+
 ## Test suite status
 
-`ctest --test-dir build --output-on-failure` (with `PARAKEET_TEST_GGUF` and
-`PARAKEET_TEST_BASELINE` exported): all 18 tests pass — the 15 Phase 0/1 tests
-plus `test_prediction`, `test_joint`, `test_transducer_core`.
+`ctest --test-dir build --output-on-failure` (with `PARAKEET_TEST_GGUF`,
+`PARAKEET_TEST_BASELINE`, `PARAKEET_TEST_BASELINE_SPEECH` exported): all 21
+runnable tests pass — the 15 Phase 0/1 tests, `test_prediction`, `test_joint`,
+`test_transducer_core`, `test_prediction_step`, `test_tdt_greedy`,
+`test_transcribe_tdt`. `test_transcribe_0_6b` skips (exit 77) unless
+`PARAKEET_TEST_GGUF_06B` points at a converted 0.6B GGUF (a ~2.4GB download not
+present in CI); with it set, it asserts the v2/v3 transcript matches NeMo.
