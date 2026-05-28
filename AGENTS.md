@@ -13,11 +13,15 @@ run the same computation natively, with no Python dependency at inference time.
 The public surface ships as a flat C-API (`include/parakeet_capi.h` +
 `libparakeet.so`) suitable for `dlopen`/FFI/LocalAI integration.
 
-Current status: Phase 4 complete.  Supports all offline Parakeet families —
+Current status: Phase 5 complete.  Supports all offline Parakeet families —
 CTC, RNNT, TDT, and hybrid TDT-CTC (0.6B/1.1B/110M, EN + multilingual v3) —
 validated at WER 0 vs NeMo on every published checkpoint.  Quantization
 (F16/Q8_0/K-quants) validated at WER 0.  Cache-aware streaming + EOU decoding
-(`parakeet_realtime_eou_120m`) is Phase 5 (future work).
+(`parakeet_realtime_eou_120m-v1`) is implemented: `pk::StreamingEncoder`
+(per-layer conv/attention caches) + `pk::StreamingSession` (carried RNN-T
+state) + `<EOU>`/`<EOB>` timed events, exposed via `parakeet_capi_stream_*` and
+`parakeet-cli transcribe --stream`.  The streaming transcript matches NeMo's
+cache-aware streaming byte-for-byte.
 
 ## Repository layout
 
@@ -38,11 +42,14 @@ src/                 libparakeet implementation
                        prediction.cpp      — stacked LSTM prediction net
                        joint.cpp           — joint network
                        tdt.cpp / rnnt.cpp  — TDT / RNNT greedy loops
+                       streaming_encoder.hpp/cpp — cache-aware streaming FastConformer encoder
+                       streaming.hpp/cpp   — pk::StreamingSession (carried RNN-T + EOU events) + run_stream_over_pcm
 examples/cli/        parakeet-cli binary
-                       subcommands: info, transcribe, quantize
+                       subcommands: info, transcribe (+ --stream), quantize
 scripts/             Python tooling
                        convert_parakeet_to_gguf.py — .nemo/.hf → GGUF (--dtype f32|f16|q8_0)
                        gen_nemo_baseline.py         — NeMo intermediates → baseline.gguf
+                       gen_stream_baseline.py       — NeMo cache-aware streaming encode+decode → stream baseline.gguf
                        validate_vs_nemo.py          — WER parity gate vs NeMo
                        publish_hf.py                — convert+quantize → HF upload (dry-run default)
                        requirements.txt             — nemo_toolkit[asr] + gguf
@@ -57,6 +64,10 @@ tests/               ctest targets
                        test_transcribe_0_6b.cpp — regression gate for 0.6B model (model-dependent)
                        test_transcribe_ctc.cpp  — standalone CTC regression (model-dependent)
                        test_transcribe_rnnt.cpp — RNNT regression (model-dependent)
+                       test_transcribe_eou.cpp  — offline EOU model transcript + token ids (PARAKEET_TEST_GGUF_EOU)
+                       test_streaming_encoder.cpp — cache-aware streaming encoder == offline + NeMo
+                       test_streaming_decode.cpp  — streaming RNN-T tokens == NeMo cache-aware streaming
+                       test_capi_stream.cpp     — streaming C-API transcript == NeMo streaming (PARAKEET_TEST_BASELINE_EOU_STREAM)
                        python/check_convert.py  — converter round-trip (model-dependent)
                        python/check_baseline.py — baseline dumper (model-dependent)
                        fixtures/clip.wav        — 2 s 16 kHz mono WAV for stage parity tests
@@ -202,11 +213,28 @@ parakeet_capi_transcribe_path
 parakeet_capi_transcribe_pcm
 parakeet_capi_free_string
 parakeet_capi_last_error
+# streaming (cache-aware EOU model parakeet_realtime_eou_120m-v1):
+parakeet_capi_stream_begin
+parakeet_capi_stream_feed       # 16k mono f32 PCM -> newly-finalized text; *eou_out=1 on <EOU>/<EOB>
+parakeet_capi_stream_finalize   # flush the end-of-stream tail
+parakeet_capi_stream_free
 ```
 
 `parakeet_capi_abi_version` returns an integer that LocalAI can check for
 compatibility; bump it on any breaking change to the above signatures or
 semantics. Additive changes (new functions) are fine without bumping.
+
+Streaming semantics: `parakeet_capi_stream_feed` buffers PCM, decodes encoder
+chunks as audio arrives (carried encoder/decoder caches), and returns the
+newly-finalized text (`<EOU>`/`<EOB>` STRIPPED — surfaced via `*eou_out`).
+`parakeet_capi_stream_finalize` flushes the streaming tail and does NOT
+fabricate an `<EOU>` NeMo's cache-aware streaming would not emit (for a final
+chunk whose right context is incomplete, the trailing `<EOU>` is dropped exactly
+as NeMo does).  Internally these wrap `pk::StreamingSession` (`src/streaming.*`):
+`feed_mel_chunk` (token ids, used by `test_streaming_decode`), `take_new_text`,
+`drain_events` (`pk::EouEvent{token,is_eob,encoder_frame,time_sec}`),
+`last_chunk_had_eou`, `finalize`.  The CLI `--stream` path uses
+`pk::run_stream_over_pcm` (full-clip mel + the model's chunk schedule).
 
 ## Dumping NeMo baselines
 

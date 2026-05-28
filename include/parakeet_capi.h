@@ -44,7 +44,43 @@ char* parakeet_capi_transcribe_path(parakeet_ctx* ctx, const char* wav_path,
 char* parakeet_capi_transcribe_pcm(parakeet_ctx* ctx, const float* samples,
                                    int n_samples, int sample_rate, int decoder);
 
-// Free a string previously returned by parakeet_capi_transcribe_*. Safe on NULL.
+// ---------------------------------------------------------------------------
+// Streaming API (cache-aware streaming RNN-T, e.g. the EOU model
+// nvidia/parakeet_realtime_eou_120m-v1). The stream session buffers incoming
+// 16 kHz mono float PCM, runs the mel front end + cache-aware StreamingEncoder +
+// carried RNN-T decoder, and surfaces newly-finalized text plus end-of-utterance
+// (<EOU>) / backchannel (<EOB>) events. No C++ exception crosses the boundary.
+// ---------------------------------------------------------------------------
+
+// Opaque streaming session. Begun from a loaded context; the context (and its
+// model) must outlive the stream. Free with parakeet_capi_stream_free.
+typedef struct parakeet_stream parakeet_stream;
+
+// Begin a streaming session over `ctx`'s model. Returns NULL on failure (e.g.
+// the model is not a cache-aware streaming model) and sets the ctx last error.
+parakeet_stream* parakeet_capi_stream_begin(parakeet_ctx* ctx);
+
+// Feed a block of 16 kHz MONO float PCM (`pcm`, length `n_samples`). The session
+// buffers the audio and decodes as full encoder chunks become available.
+// Returns the newly-finalized text since the last call as a malloc'd UTF-8
+// string (free with parakeet_capi_free_string) — "" (empty, non-NULL) if no new
+// text was finalized this call, NULL only on error. <EOU>/<EOB> are stripped
+// from the text and surfaced as events: if `eou_out` is non-NULL it is set to 1
+// when an <EOU>/<EOB> event fired during this feed, else 0.
+char* parakeet_capi_stream_feed(parakeet_stream* s, const float* pcm,
+                                int n_samples, int* eou_out);
+
+// Flush the end-of-stream tail: process any remaining buffered audio (the final
+// chunk completes the streaming tail). Returns the final newly-finalized text
+// (malloc'd; "" if none, NULL on error). After this the running transcript is
+// complete. Does NOT fabricate an <EOU> NeMo's streaming would not emit.
+char* parakeet_capi_stream_finalize(parakeet_stream* s);
+
+// Free a streaming session. Safe on NULL.
+void parakeet_capi_stream_free(parakeet_stream* s);
+
+// Free a string previously returned by parakeet_capi_transcribe_* /
+// parakeet_capi_stream_*. Safe on NULL.
 void parakeet_capi_free_string(char* s);
 
 // Human-readable description of the last error on `ctx`, or "" if none.

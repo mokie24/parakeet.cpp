@@ -44,7 +44,15 @@ Notes:
 - `parakeet_realtime_eou_120m-v1` offline (5a): vocab 1026 includes `<EOU>`=1024
   and `<EOB>`=1025; blank_id=1026 (V_plus=1027); the transducer emits `<EOU>`
   literally at end-of-utterance — the C++ offline transcript matches NeMo including
-  the trailing `<EOU>` token. Streaming (5b, 5c) is future work (Tasks 5-7).
+  the trailing `<EOU>` token.
+- `parakeet_realtime_eou_120m-v1` cache-aware streaming (5b/5c, Tasks 5-7): the
+  streaming encoder output == offline (leading frames, max|d|≈3e-6) and ==
+  NeMo's `cache_aware_stream_step` output; streaming decode tokens == NeMo
+  cache-aware streaming == offline minus the trailing streaming-tail `<EOU>`.
+  EOU/EOB are surfaced as timed events (stripped from the running text). For this
+  clip NeMo's streaming does NOT emit `<EOU>` (the final-chunk tail has incomplete
+  right context); the C++ streaming session/C-API/CLI match that exactly and do
+  not fabricate one. See "Phase 5 — Streaming + EOU" below.
 
 ---
 
@@ -457,4 +465,99 @@ Reproduce:
 PARAKEET_TEST_GGUF_EOU=/tmp/eou.gguf \
 PARAKEET_TEST_BASELINE_EOU=/tmp/baseline_eou.gguf \
 ctest --test-dir build -R test_transcribe_eou --output-on-failure
+```
+
+---
+
+## Phase 5 — Streaming + EOU (5b/5c, Tasks 5-7)
+
+**Model:** `nvidia/parakeet_realtime_eou_120m-v1` — cache-aware streaming
+FastConformer RNN-T. Streaming parameters (from the GGUF `parakeet.streaming.*`
+KV): `chunk_size=[9,16]`, `pre_encode_cache_size=[0,9]`, `valid_out_len=2`,
+`last_channel_cache_size=70`, `drop_extra_pre_encoded=2`, `att_context=[70,1]`,
+`att_context_style=chunked_limited`.
+
+### Streaming encoder (Task 5)
+
+`pk::StreamingEncoder` carries per-layer convolution (`cache_last_time`) and
+attention (`cache_last_channel`) caches across chunks. The concatenated per-chunk
+valid output equals the OFFLINE encoder output over the leading frames
+(cache-aware equivalence, max|d| ≈ **2.9e-6** over the leading 92 of 94 frames),
+and matches NeMo's `cache_aware_stream_step` output. The trailing
+`valid_out_len=2` frames of the final chunk are the streaming tail (incomplete
+right context — diverge from offline by design).
+
+### Streaming decode + carried RNN-T state (Task 6)
+
+`pk::StreamingSession` drives the streaming encoder + a carried RNN-T greedy
+decoder state (`RnntDecodeState`: prediction-net LSTM h/c, last emitted token,
+SOS flag — never reset between chunks; mirrors NeMo `partial_hypotheses`). For
+`speech.wav` it emits **44 tokens**, EXACTLY equal to NeMo's own cache-aware
+streaming decode (`conformer_stream_step` carrying `previous_hypotheses`) and to
+the offline `rnnt_token_ids` (45) minus the trailing streaming-tail `<EOU>`=1024.
+
+### EOU events + streaming text (Task 7)
+
+`<EOU>`=1024 / `<EOB>`=1025 are resolved from the tokenizer pieces, STRIPPED from
+the running transcript, and surfaced as timed events
+(`pk::EouEvent{token, is_eob, encoder_frame, time_sec}`,
+`time_sec = encoder_frame * hop * subsampling_factor / sample_rate`).
+
+| Mode | NeMo streaming transcript | C++ streaming (`StreamingSession` / C-API / `--stream`) | `<EOU>` |
+| --- | --- | --- | --- |
+| Cache-aware streaming (`speech.wav`) | `well i don't wish to see it any more observed phoebe turning away her eyes it is certainly very like the old portrait` | identical (byte-for-byte) | not emitted in-stream (matches NeMo `eou_in_stream=0`) |
+
+The streaming transcript is the offline transcript with the trailing `<EOU>`
+dropped — NeMo's cache-aware streaming does NOT emit it because the final-chunk
+tail has incomplete right context. `finalize()` flushes the tail but does **not**
+fabricate an `<EOU>` NeMo would not emit; for clips where an utterance ends with
+full right context, the corresponding `<EOU>`/`<EOB>` would surface as an event.
+
+### Streaming C-API
+
+```c
+parakeet_stream* parakeet_capi_stream_begin(parakeet_ctx*);
+char* parakeet_capi_stream_feed(parakeet_stream*, const float* pcm, int n, int* eou_out);
+char* parakeet_capi_stream_finalize(parakeet_stream*);
+void  parakeet_capi_stream_free(parakeet_stream*);
+```
+
+`feed` accepts 16 kHz mono f32 PCM, buffers it, decodes encoder chunks as audio
+arrives (carried caches), and returns the newly-finalized text (malloc'd; "" if
+none); `*eou_out=1` if an `<EOU>`/`<EOB>` event fired this feed. `finalize`
+flushes the tail. Strings are freed with `parakeet_capi_free_string`. Exported
+from `libparakeet.so` (verified via `nm -D`).
+
+### Regression tests
+
+- `tests/test_streaming_encoder.cpp` (`test_streaming_encoder`) — streaming
+  encoder == offline + NeMo streaming (`PARAKEET_TEST_GGUF_EOU` +
+  `PARAKEET_TEST_BASELINE_EOU` + `PARAKEET_TEST_BASELINE_EOU_STREAM`).
+- `tests/test_streaming_decode.cpp` (`test_streaming_decode`) — streaming tokens
+  == NeMo streaming == offline minus trailing `<EOU>`.
+- `tests/test_capi_stream.cpp` (`test_capi_stream`) — feeds `speech.wav` PCM in
+  chunks through the streaming C-API; the concatenated text + `finalize` equals
+  `baseline.stream_text` from `/tmp/baseline_eou_stream.gguf` (NeMo streaming).
+  Skips (exit 77) unless `PARAKEET_TEST_GGUF_EOU` +
+  `PARAKEET_TEST_BASELINE_EOU_STREAM` are set.
+
+Reproduce:
+
+```bash
+# Streaming reference (NeMo cache-aware streaming encode + decode):
+.venv/bin/python scripts/gen_stream_baseline.py \
+    --model nvidia/parakeet_realtime_eou_120m-v1 \
+    --audio tests/fixtures/speech.wav --output /tmp/baseline_eou_stream.gguf
+
+# CLI streaming:
+./build/examples/cli/parakeet-cli transcribe \
+    --model /tmp/eou.gguf --input tests/fixtures/speech.wav --stream
+# -> [stream] well i don't wish to see it ... like the old portrait
+#    [stream:final] well i don't wish to see it ... like the old portrait
+
+# ctest:
+PARAKEET_TEST_GGUF_EOU=/tmp/eou.gguf \
+PARAKEET_TEST_BASELINE_EOU=/tmp/baseline_eou.gguf \
+PARAKEET_TEST_BASELINE_EOU_STREAM=/tmp/baseline_eou_stream.gguf \
+ctest --test-dir build -R "test_capi_stream|test_streaming" --output-on-failure
 ```

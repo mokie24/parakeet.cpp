@@ -30,7 +30,8 @@ std::vector<int32_t> rnnt_decode_frames(const PredictionNet& pred, const Joint& 
                                         const std::vector<float>& enc_frames,
                                         int Tnew, int enc_hidden,
                                         RnntDecodeState& st,
-                                        int blank_id, int max_symbols) {
+                                        int blank_id, int max_symbols,
+                                        std::vector<int32_t>* emit_frames) {
     assert((int)enc_frames.size() == (size_t)Tnew * enc_hidden);
     assert(joint.num_durations() == 0);
 
@@ -76,6 +77,7 @@ std::vector<int32_t> rnnt_decode_frames(const PredictionNet& pred, const Joint& 
             // Non-blank -> emit, commit state + last token, STAY at this frame.
             st.hyp.push_back((int32_t)k);
             emitted_this_call.push_back((int32_t)k);
+            if (emit_frames) emit_frames->push_back((int32_t)t);
             st.last_token = (int32_t)k;
             st.state = out_state;
             st.have_token = true;

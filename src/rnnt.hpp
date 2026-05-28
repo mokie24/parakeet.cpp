@@ -73,10 +73,17 @@ RnntDecodeState rnnt_decode_init(const PredictionNet& pred);
 // Appends the newly emitted token ids to st.hyp AND returns the ids emitted in
 // THIS call (for the streaming "newly finalized tokens" API). The decoder state
 // (LSTM, last token, SOS flag) persists in `st` across calls.
+//
+// If `emit_frames` is non-null it is filled (one entry per returned token) with
+// the LOCAL frame index t in [0, Tnew) at which that token was emitted — the
+// caller adds the running global encoder-frame offset to recover an absolute
+// frame index (used for EOU/EOB event timing, matching NeMo's per-token
+// timestamp = the encoder time index that produced the symbol).
 std::vector<int32_t> rnnt_decode_frames(const PredictionNet& pred, const Joint& joint,
                                         const std::vector<float>& enc_frames,
                                         int Tnew, int enc_hidden,
                                         RnntDecodeState& st,
-                                        int blank_id, int max_symbols);
+                                        int blank_id, int max_symbols,
+                                        std::vector<int32_t>* emit_frames = nullptr);
 
 } // namespace pk

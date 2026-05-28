@@ -6,8 +6,10 @@ backends via ggml) without a Python runtime at inference time.
 
 Supports all offline Parakeet families — CTC, RNNT, TDT, and hybrid TDT-CTC
 (0.6B/1.1B/110M, EN + multilingual v3) — validated at WER 0 vs NeMo on every
-published checkpoint. See `docs/parity.md` for the full coverage matrix.
-Cache-aware streaming + EOU is future work (Phase 5).
+published checkpoint, plus **cache-aware streaming + end-of-utterance (EOU)
+detection** for `parakeet_realtime_eou_120m-v1` (streaming transcript matches
+NeMo's cache-aware streaming byte-for-byte). See `docs/parity.md` for the full
+coverage matrix.
 
 ---
 
@@ -116,6 +118,11 @@ parakeet-cli transcribe --model m.gguf --input audio.wav --decoder tdt
 
 # Print model metadata (arch, dims, mel params, vocab size, TDT durations)
 parakeet-cli info m.gguf
+
+# Cache-aware streaming (EOU model parakeet_realtime_eou_120m-v1): feeds the WAV
+# in the model's chunk schedule, prints partial text incrementally and
+# [EOU @ <t>s] / [EOB @ <t>s] event markers, then the finalized tail.
+parakeet-cli transcribe --model eou.gguf --input audio.wav --stream
 ```
 
 The `parakeet-cli` binary is at `build/examples/cli/parakeet-cli`.
@@ -146,8 +153,32 @@ char *text = parakeet_capi_transcribe_pcm(ctx, samples, n_samples,
                                           sample_rate, 0 /*default*/);
 ```
 
+### Streaming (cache-aware EOU model)
+
+For `parakeet_realtime_eou_120m-v1`, a streaming session decodes 16 kHz mono f32
+PCM as it arrives, returning newly-finalized text and signalling EOU/EOB events:
+
+```c
+parakeet_stream *s = parakeet_capi_stream_begin(ctx);
+int eou = 0;
+char *t = parakeet_capi_stream_feed(s, pcm, n_samples, &eou); // "" if none yet
+if (t) { printf("%s", t); parakeet_capi_free_string(t); }
+if (eou) printf(" [EOU]");
+// ...feed more chunks...
+char *tail = parakeet_capi_stream_finalize(s);                // flush the tail
+if (tail) { printf("%s\n", tail); parakeet_capi_free_string(tail); }
+parakeet_capi_stream_free(s);
+```
+
+`<EOU>` (end-of-utterance) / `<EOB>` (backchannel) are stripped from the text and
+surfaced via `*eou_out` (the CLI `--stream` prints them as `[EOU @ <t>s]`
+markers). The streaming transcript matches NeMo's cache-aware streaming exactly;
+`finalize` flushes the end-of-stream tail and does not fabricate an `<EOU>` NeMo
+would not emit.
+
 The LocalAI backend (in the LocalAI repo) dlopens `libparakeet.so` and uses
-these symbols directly. See `include/parakeet_capi.h` for the full API.
+these symbols directly (offline `parakeet_capi_transcribe_*` and streaming
+`parakeet_capi_stream_*`). See `include/parakeet_capi.h` for the full API.
 
 ---
 
@@ -165,8 +196,12 @@ See `docs/parity.md` for the full coverage matrix. Summary:
 
 All 10 published offline checkpoints validated at WER 0 vs NeMo 2.7.3.
 Sizes: 110M (512/17 layers), 0.6B (1024/24), 1.1B (1024/42).
-Cache-aware streaming + EOU (`parakeet_realtime_eou_120m-v1`) is Phase 5
-(future work).
+
+Cache-aware streaming + EOU (`parakeet_realtime_eou_120m-v1`) is implemented
+(Phase 5): `layer_norm` + causal conv, causal subsampling, chunked-limited
+attention, per-layer conv/attention caches, carried RNN-T decoder state, and
+`<EOU>`/`<EOB>` events. The streaming transcript matches NeMo's cache-aware
+streaming byte-for-byte. See `docs/parity.md` (Phase 5 — Streaming + EOU).
 
 ---
 

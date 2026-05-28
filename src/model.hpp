@@ -36,6 +36,10 @@ public:
 
     const ParakeetConfig& config() const { return loader_.config(); }
 
+    // The underlying loaded GGUF. Exposed so the streaming C-API can build a
+    // pk::StreamingSession (and a MelFrontend) over the same load-once model.
+    const ModelLoader& loader() const { return loader_; }
+
     // Non-copyable (owns the GGUF mapping).
     Model(const Model&) = delete;
     Model& operator=(const Model&) = delete;

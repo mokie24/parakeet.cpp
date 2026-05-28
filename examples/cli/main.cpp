@@ -1,5 +1,7 @@
 #include "parakeet.h"
 #include "model_loader.hpp"
+#include "audio_io.hpp"
+#include "streaming.hpp"
 #include "ggml.h"
 #include "gguf.h"
 #include <algorithm>
@@ -54,11 +56,66 @@ static int cmd_info(const char* path) {
     return 0;
 }
 
+// Cache-aware streaming transcription for the EOU streaming model. Feeds the WAV
+// to a pk::StreamingSession in the model's exact chunk schedule, printing partial
+// text incrementally and `[EOU @ <t>s]` / `[EOB @ <t>s]` markers when events
+// fire, then the finalize() tail. Returns 0/1.
+static int cmd_transcribe_stream(const std::string& model, const std::string& input) {
+    pk::ModelLoader ml;
+    if (!ml.load(model)) {
+        std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
+        return 1;
+    }
+    if (!ml.config().streaming.present) {
+        std::fprintf(stderr,
+            "parakeet-cli: --stream requires a cache-aware streaming model "
+            "(e.g. parakeet_realtime_eou_120m-v1); %s is not one\n", model.c_str());
+        return 1;
+    }
+    pk::Audio audio;
+    if (!pk::load_audio_16k_mono(input, audio)) {
+        std::fprintf(stderr, "parakeet-cli: failed to load audio %s\n", input.c_str());
+        return 1;
+    }
+
+    try {
+        pk::StreamingSession sess(ml);
+        std::printf("[stream] ");
+        std::fflush(stdout);
+        pk::run_stream_over_pcm(
+            sess, ml, audio.samples,
+            [&](const std::string& new_text, const std::vector<pk::EouEvent>& evs) {
+                if (!new_text.empty()) {
+                    std::printf("%s", new_text.c_str());
+                    std::fflush(stdout);
+                }
+                for (const pk::EouEvent& e : evs) {
+                    std::printf(" [%s @ %.2fs]", e.is_eob ? "EOB" : "EOU", e.time_sec);
+                    std::fflush(stdout);
+                }
+            });
+        // Flush the end-of-stream tail (no extra <EOU> is fabricated if NeMo's
+        // streaming would not emit one for this clip).
+        std::string tail = sess.finalize();
+        if (!tail.empty()) std::printf("%s", tail.c_str());
+        std::printf("\n");
+        // Also print the full transcript on its own line for easy capture.
+        std::printf("[stream:final] %s\n", sess.text().c_str());
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "parakeet-cli: streaming failed: %s\n", e.what());
+        return 1;
+    }
+    return 0;
+}
+
 // parakeet-cli transcribe --model <m.gguf> --input <wav> [--decoder ctc|tdt]
+//                         [--stream]
 // Prints the transcript. Default decoder is chosen by arch (TDT for transducer
-// archs, CTC for ctc arch — matching NeMo's cur_decoder default).
+// archs, CTC for ctc arch — matching NeMo's cur_decoder default). --stream uses
+// the cache-aware streaming path (EOU streaming model only).
 static int cmd_transcribe(int argc, char** argv) {
     std::string model, input, decoder_str;
+    bool stream = false;
     for (int i = 0; i < argc; ++i) {
         if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             model = argv[++i];
@@ -66,13 +123,23 @@ static int cmd_transcribe(int argc, char** argv) {
             input = argv[++i];
         } else if (std::strcmp(argv[i], "--decoder") == 0 && i + 1 < argc) {
             decoder_str = argv[++i];
+        } else if (std::strcmp(argv[i], "--stream") == 0) {
+            stream = true;
         }
     }
     if (model.empty() || input.empty()) {
         std::fprintf(stderr,
             "usage: parakeet-cli transcribe --model <m.gguf> --input <wav> "
-            "[--decoder ctc|tdt]\n");
+            "[--decoder ctc|tdt] [--stream]\n");
         return 2;
+    }
+
+    if (stream) {
+        if (!decoder_str.empty()) {
+            std::fprintf(stderr,
+                "parakeet-cli: --stream is RNN-T only; --decoder is ignored\n");
+        }
+        return cmd_transcribe_stream(model, input);
     }
 
     // Resolve the decoder selector.
@@ -274,7 +341,7 @@ int main(int argc, char** argv) {
         "usage:\n"
         "  parakeet-cli info <model.gguf>\n"
         "  parakeet-cli transcribe --model <model.gguf> --input <wav> "
-        "[--decoder ctc|tdt]\n"
+        "[--decoder ctc|tdt] [--stream]\n"
         "  parakeet-cli quantize <in.gguf> <out.gguf> "
         "<q4_0|q5_0|q8_0|q4_k|q5_k|q6_k>\n");
     return 2;
