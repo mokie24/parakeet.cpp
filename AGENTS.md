@@ -10,8 +10,10 @@ parity with the NeMo reference: a Python converter turns a NeMo checkpoint into
 a metadata-driven GGUF, and a C++ model loader + conformer inference engine
 run the same computation natively.
 
-Current status: Phase 0 (foundation) complete.  Phase 1 (mel → encoder →
-CTC inference with parity tests against NeMo baselines) is next.
+Current status: Phase 3.5 complete.  Supports all offline Parakeet families —
+CTC, RNNT, TDT, and hybrid TDT-CTC (0.6B/1.1B/110M, EN + multilingual v3) —
+validated at WER 0 vs NeMo on every published checkpoint.  Cache-aware
+streaming + EOU decoding (parakeet_realtime_eou_120m) is Phase 5 (future work).
 
 ## Repository layout
 

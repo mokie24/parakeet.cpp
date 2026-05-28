@@ -1,4 +1,4 @@
-# parakeet.cpp — Parity report (Phase 1)
+# parakeet.cpp — Parity report
 
 This document records the numerical and end-to-end parity of the C++/ggml
 inference path against the NeMo reference implementation.
@@ -7,6 +7,40 @@ inference path against the NeMo reference implementation.
 hybrid TDT/CTC model (selected via `m.change_decoding_strategy(decoder_type='ctc')`).
 NeMo version 2.7.3. All comparisons are CPU, batch size 1, deterministic
 (CTC greedy decode).
+
+---
+
+## Model coverage matrix (Phase 3.5 — all offline Parakeet checkpoints)
+
+Every published offline Parakeet checkpoint validated end-to-end against NeMo on
+`tests/fixtures/speech.wav` (LibriSpeech `2086-149220-0033`, ~7.4 s, English).
+`WER vs NeMo` is word-error-rate (0.0 = byte-for-byte identical). All runs are
+CPU, batch 1, deterministic greedy (NeMo 2.7.3).
+
+| Checkpoint | Family | arch | d\_model / layers | mel | xscaling | vocab | Validated head(s) | WER vs NeMo | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `parakeet-tdt_ctc-110m` | Hybrid TDT+CTC | `hybrid_tdt_ctc` | 512 / 17 | 80 | false | 1024 | TDT + CTC | **0.0** | PASS |
+| `parakeet-tdt-0.6b-v2` | TDT (hybrid) | `hybrid_tdt_ctc` | 1024 / 24 | 128 | false | 1024 | TDT | **0.0** | PASS |
+| `parakeet-tdt-0.6b-v3` | TDT (hybrid, multilingual) | `hybrid_tdt_ctc` | 1024 / 24 | 128 | false | 8192 | TDT | **0.0** | PASS |
+| `parakeet-tdt-0.6b` (v1) | TDT | — | — | — | — | — | — | — | N/A — not published (superseded by v2) |
+| `parakeet-tdt-1.1b` | TDT | `tdt` | 1024 / 42 | 80 | false | 1024 | TDT | **0.0** | PASS |
+| `parakeet-tdt_ctc-1.1b` | Hybrid TDT+CTC | `hybrid_tdt_ctc` | 1024 / 42 | 80 | false | 1024 | TDT + CTC | **0.0** | PASS |
+| `parakeet-ctc-0.6b` | CTC | `ctc` | 1024 / 24 | 80 | **true** | 1024 | CTC | **0.0** | PASS |
+| `parakeet-ctc-1.1b` | CTC | `ctc` | 1024 / 42 | 80 | **true** | 1024 | CTC | **0.0** | PASS |
+| `parakeet-rnnt-0.6b` | RNNT | `rnnt` | 1024 / 24 | 80 | **true** | 1024 | RNNT | **0.0** | PASS |
+| `parakeet-rnnt-1.1b` | RNNT | `rnnt` | 1024 / 42 | 80 | **true** | 1024 | RNNT | **0.0** | PASS |
+| `parakeet_realtime_eou_120m-v1` | Streaming + EOU | — | — | — | — | — | — | — | Future work (Phase 5) |
+
+Notes:
+- `xscaling` = NeMo FastConformer `xscale=sqrt(d_model)` (true) vs `xscale=None` (false).
+- Hybrid models validated on both TDT and CTC heads where practical.
+- `parakeet-tdt-1.1b` is labelled `tdt` (pure, no `aux_ctc`); the two 0.6B TDT
+  checkpoints are labelled `hybrid_tdt_ctc` (NeMo stores them as
+  `EncDecRNNTBPEModel` with `cfg.aux_ctc`).
+- Committed regression tests lock the CTC and RNNT decoder paths against
+  regression: `tests/test_transcribe_ctc.cpp` (`PARAKEET_TEST_GGUF_CTC`) and
+  `tests/test_transcribe_rnnt.cpp` (`PARAKEET_TEST_GGUF_RNNT`) — both skip (exit
+  77) in CI unless the corresponding GGUF env var is set.
 
 ---
 
@@ -332,9 +366,18 @@ heads — and the C++ port reproduces each head exactly, including the second he
 ## Test suite status
 
 `ctest --test-dir build --output-on-failure` (with `PARAKEET_TEST_GGUF`,
-`PARAKEET_TEST_BASELINE`, `PARAKEET_TEST_BASELINE_SPEECH` exported): all 21
-runnable tests pass — the 15 Phase 0/1 tests, `test_prediction`, `test_joint`,
-`test_transducer_core`, `test_prediction_step`, `test_tdt_greedy`,
-`test_transcribe_tdt`. `test_transcribe_0_6b` skips (exit 77) unless
-`PARAKEET_TEST_GGUF_06B` points at a converted 0.6B GGUF (a ~2.4GB download not
-present in CI); with it set, it asserts the v2/v3 transcript matches NeMo.
+`PARAKEET_TEST_BASELINE`, `PARAKEET_TEST_BASELINE_SPEECH` exported): all runnable
+tests pass. The full suite includes the 15 Phase 0/1 tests, `test_prediction`,
+`test_joint`, `test_transducer_core`, `test_prediction_step`, `test_tdt_greedy`,
+`test_transcribe_tdt`, plus three large-model regression tests that skip (exit 77)
+when the corresponding GGUF env var is absent:
+
+| Test | Env var | Decoder path locked |
+| --- | --- | --- |
+| `test_transcribe_0_6b` | `PARAKEET_TEST_GGUF_06B` | TDT greedy (`parakeet-tdt-0.6b-v2/-v3`) |
+| `test_transcribe_ctc` | `PARAKEET_TEST_GGUF_CTC` | Standalone CTC head (`parakeet-ctc-0.6b`) |
+| `test_transcribe_rnnt` | `PARAKEET_TEST_GGUF_RNNT` | RNNT greedy (`parakeet-rnnt-0.6b`) |
+
+Each asserts the C++ transcript equals the stored NeMo reference word-for-word
+(WER 0) on `tests/fixtures/speech.wav`. All three carry the `model` label and run
+from the project root (WORKING_DIRECTORY).
