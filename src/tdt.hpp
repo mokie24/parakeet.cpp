@@ -1,6 +1,7 @@
 #pragma once
 #include "prediction.hpp"
 #include "joint.hpp"
+#include "decode_types.hpp"
 #include <vector>
 #include <cstdint>
 
@@ -42,9 +43,17 @@ namespace pk {
 // max_symbols: max symbols emitted per time frame (NeMo default 10).
 //
 // Returns the emitted token-id sequence (hyp). All emitted ids are < blank_id.
+//
+// If `tokens` is non-null it is filled (one entry per emitted id, in order) with
+// per-token metadata matching NeMo's timestamps=True + 'max_prob' confidence
+// (see TokenInfo): frame = the encoder frame t at emission, conf = max_prob over
+// the token slice logits[0:vocab+1] (excluding the TDT duration logits), span =
+// durations[d_k] (the predicted duration applied to the token). The id-only path
+// (tokens == nullptr) is unchanged.
 std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
                                 const std::vector<float>& enc, int T, int enc_hidden,
                                 const std::vector<int32_t>& durations,
-                                int blank_id, int max_symbols);
+                                int blank_id, int max_symbols,
+                                std::vector<TokenInfo>* tokens = nullptr);
 
 } // namespace pk

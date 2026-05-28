@@ -1,5 +1,6 @@
 #include "rnnt.hpp"
 #include <cassert>
+#include <cmath>
 #include <cstring>
 
 namespace pk {
@@ -14,6 +15,21 @@ int argmax(const float* a, int n) {
         if (a[i] > bv) { bv = a[i]; best = i; }
     }
     return best;
+}
+
+// NeMo's rescaled `max_prob` confidence (method 'max_prob', alpha==1.0):
+//   conf = (N * p_max - 1) / (N - 1),  p_max = softmax(logits)[k].
+// For RNN-T the confidence slice is the FULL joint output vector (V_plus =
+// vocab + 1, blank included; no durations) — NeMo log_softmaxes the whole
+// joint output. N == n (the slice size). Stable softmax (subtract the max).
+float max_prob_conf_logits(const float* a, int n, int k) {
+    float mx = a[0];
+    for (int i = 1; i < n; ++i) if (a[i] > mx) mx = a[i];
+    double denom = 0.0;
+    for (int i = 0; i < n; ++i) denom += std::exp((double)a[i] - (double)mx);
+    const double p_max = std::exp((double)a[k] - (double)mx) / denom;
+    const double N = (double)n;
+    return (float)((N * p_max - 1.0) / (N - 1.0));
 }
 } // namespace
 
@@ -31,7 +47,8 @@ std::vector<int32_t> rnnt_decode_frames(const PredictionNet& pred, const Joint& 
                                         int Tnew, int enc_hidden,
                                         RnntDecodeState& st,
                                         int blank_id, int max_symbols,
-                                        std::vector<int32_t>* emit_frames) {
+                                        std::vector<int32_t>* emit_frames,
+                                        std::vector<TokenInfo>* tokens) {
     assert((int)enc_frames.size() == (size_t)Tnew * enc_hidden);
     assert(joint.num_durations() == 0);
 
@@ -78,6 +95,14 @@ std::vector<int32_t> rnnt_decode_frames(const PredictionNet& pred, const Joint& 
             st.hyp.push_back((int32_t)k);
             emitted_this_call.push_back((int32_t)k);
             if (emit_frames) emit_frames->push_back((int32_t)t);
+            if (tokens) {
+                // NeMo per-token metadata (GreedyRNNTInfer._greedy_decode +
+                // max_prob confidence): frame = the (local) encoder frame t at
+                // emission, conf = max_prob over the full joint output vector
+                // (N = V_plus = vocab+1), span = 1 (RNN-T advances one frame).
+                const float conf = max_prob_conf_logits(logits.data(), token_count, k);
+                tokens->push_back(TokenInfo{ (int32_t)k, (int32_t)t, conf, 1 });
+            }
             st.last_token = (int32_t)k;
             st.state = out_state;
             st.have_token = true;
@@ -93,12 +118,15 @@ std::vector<int32_t> rnnt_decode_frames(const PredictionNet& pred, const Joint& 
 
 std::vector<int32_t> rnnt_greedy(const PredictionNet& pred, const Joint& joint,
                                  const std::vector<float>& enc, int T, int enc_hidden,
-                                 int blank_id, int max_symbols) {
+                                 int blank_id, int max_symbols,
+                                 std::vector<TokenInfo>* tokens) {
     // The whole-encoder greedy decode is exactly the stateful stepper driven
     // once over all T frames from a fresh state (the loop carries nothing but
     // RnntDecodeState across frames, so chunking is irrelevant to the result).
     RnntDecodeState st = rnnt_decode_init(pred);
-    rnnt_decode_frames(pred, joint, enc, T, enc_hidden, st, blank_id, max_symbols);
+    if (tokens) tokens->clear();
+    rnnt_decode_frames(pred, joint, enc, T, enc_hidden, st, blank_id, max_symbols,
+                       /*emit_frames=*/nullptr, tokens);
     return st.hyp;
 }
 

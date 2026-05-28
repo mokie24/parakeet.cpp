@@ -1,6 +1,7 @@
 #pragma once
 #include "prediction.hpp"
 #include "joint.hpp"
+#include "decode_types.hpp"
 #include <vector>
 #include <cstdint>
 
@@ -40,9 +41,15 @@ namespace pk {
 // max_symbols: max symbols emitted per time frame (NeMo default 10).
 //
 // Returns the emitted token-id sequence (hyp). All emitted ids are < blank_id.
+//
+// If `tokens` is non-null it is filled (one entry per emitted id, in order) with
+// per-token metadata (see TokenInfo): frame = the encoder frame t at emission,
+// conf = max_prob over the full joint output vector, span = 1. The id-only path
+// (tokens == nullptr) is unchanged.
 std::vector<int32_t> rnnt_greedy(const PredictionNet& pred, const Joint& joint,
                                  const std::vector<float>& enc, int T, int enc_hidden,
-                                 int blank_id, int max_symbols);
+                                 int blank_id, int max_symbols,
+                                 std::vector<TokenInfo>* tokens = nullptr);
 
 // Carried RNN-T greedy decoding state, so the per-frame loop can be driven
 // INCREMENTALLY (the encoder frames arrive in chunks but the decoder must NOT
@@ -79,11 +86,19 @@ RnntDecodeState rnnt_decode_init(const PredictionNet& pred);
 // caller adds the running global encoder-frame offset to recover an absolute
 // frame index (used for EOU/EOB event timing, matching NeMo's per-token
 // timestamp = the encoder time index that produced the symbol).
+//
+// If `tokens` is non-null it is APPENDED to (one entry per token emitted in this
+// call, same convention as `emit_frames`) with per-token metadata matching
+// NeMo's timestamps=True + 'max_prob' confidence (see TokenInfo): frame = the
+// LOCAL emission frame t in [0, Tnew), conf = max_prob over the full joint output
+// vector (N = V_plus = vocab+1), span = 1. The id-only paths (both out-params
+// null) are unchanged.
 std::vector<int32_t> rnnt_decode_frames(const PredictionNet& pred, const Joint& joint,
                                         const std::vector<float>& enc_frames,
                                         int Tnew, int enc_hidden,
                                         RnntDecodeState& st,
                                         int blank_id, int max_symbols,
-                                        std::vector<int32_t>* emit_frames = nullptr);
+                                        std::vector<int32_t>* emit_frames = nullptr,
+                                        std::vector<TokenInfo>* tokens = nullptr);
 
 } // namespace pk

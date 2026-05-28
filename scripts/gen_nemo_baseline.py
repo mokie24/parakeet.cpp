@@ -150,12 +150,23 @@ def _timestamps_decoding_cfg(m):
 
     NeMo's ``max_prob`` is NOT the raw softmax probability: it is the *rescaled*
     confidence ``(p_max * V - 1) / (V - 1)`` (with ``alpha == 1.0``), where
-    ``p_max = exp(max log-prob)`` and ``V`` is the vocab size (see
-    ``asr_confidence_utils.get_confidence_measure_bank``). We dump NeMo's actual
-    confidence values so the C++ side can reproduce *that* mapping.
+    ``p_max = exp(max log-prob)`` and ``V == num_tokens == vocab_size + 1``
+    (blank included; see ``asr_confidence_utils.get_confidence_measure_bank`` and
+    ``ConfidenceMethodMixin._init_confidence_method`` where
+    ``num_tokens = blank_id + 1``). We dump NeMo's actual confidence values so the
+    C++ side can reproduce *that* mapping.
 
-    ``aggregation='min'`` (NeMo default) -> per-word confidence is the MIN of its
-    tokens' confidences.
+    IMPORTANT: ``method_cfg`` MUST pin ``alpha=1.0`` explicitly. The model's own
+    ``decoding`` cfg carries a default ``confidence_method_cfg`` with
+    ``alpha: 0.33`` (an entropy default). When we only set ``method_cfg.name``,
+    OmegaConf MERGES our partial dict over that default, so the leftover
+    ``alpha: 0.33`` survives — and NeMo's ``max_prob`` lambda has a SEPARATE
+    ``t != 1.0`` branch ``((x.max·t).exp()·V^t - 1)/(V^t - 1)`` that is then used,
+    yielding NOT the plain rescaled max-prob. Pinning ``alpha=1.0`` forces the
+    intended ``(p_max·V - 1)/(V - 1)`` measure that this plan targets.
+
+    ``aggregation='min'`` (NeMo default) -> per-token confidence over a CTC token's
+    consecutive argmax run, and per-word confidence over its tokens, are the MIN.
     """
     from omegaconf import OmegaConf
 
@@ -166,7 +177,7 @@ def _timestamps_decoding_cfg(m):
         "preserve_word_confidence": True,
         "exclude_blank": True,
         "aggregation": "min",
-        "method_cfg": {"name": "max_prob"},
+        "method_cfg": {"name": "max_prob", "alpha": 1.0},
     }
     return cfg
 
@@ -186,8 +197,17 @@ def _dump_head_timestamps(m, audio, decoder_type, blank_id):
         drop blanks. This yields a sequence that aligns 1:1 with ``timestamp['char']``
         and ``token_confidence`` and detokenizes to ``hyp.text``.
 
-    The per-token encoder frame is ``timestamp['char'][i]['start_offset']`` (the
-    frame index where the token was emitted) for BOTH heads.
+    The per-token encoder frame differs by head (so the C++ greedy decoders can
+    reproduce the frame they naturally know at emission):
+      * CTC: ``timestamp['char'][i]['start_offset']`` — the frame where the
+        collapsed token's consecutive argmax RUN STARTS (NeMo CTC start_offset =
+        the previous token's emit frame; the C++ ctc_greedy records the run-start).
+      * RNNT/TDT: ``timestamp['timestep'][i]`` — the RAW encoder frame ``time_idx``
+        at which the symbol was emitted (== the C++ rnnt/tdt greedy ``t`` at
+        emission). We deliberately do NOT use ``char.start_offset`` here: for TDT
+        the char offsets pass through ``_refine_timestamps_tdt``, which overrides a
+        PUNCTUATION token's start_offset to the previous token's end_offset — a
+        word-timing refinement (Task 3), not the per-token emission frame.
     """
     import torch
 
@@ -197,9 +217,27 @@ def _dump_head_timestamps(m, audio, decoder_type, blank_id):
     hyp = (out[0] if isinstance(out, tuple) else out)[0]
 
     char_offsets = hyp.timestamp["char"]
-    token_frames = np.array(
-        [int(c["start_offset"]) for c in char_offsets], dtype=np.int32
-    )
+    if decoder_type == "ctc":
+        token_frames = np.array(
+            [int(c["start_offset"]) for c in char_offsets], dtype=np.int32
+        )
+    else:
+        # RNNT/TDT: raw emission frame (hypothesis.timestamp, stored under
+        # 'timestep' after compute_rnnt_timestamps), filtered to non-blank tokens
+        # to align 1:1 with the emitted token-id sequence.
+        ts = hyp.timestamp
+        timestep = ts["timestep"] if isinstance(ts, dict) else ts
+        timestep = timestep.cpu().tolist() if hasattr(timestep, "cpu") else list(timestep)
+        ys_for_frames = hyp.y_sequence
+        ys_for_frames = (
+            ys_for_frames.cpu().tolist()
+            if hasattr(ys_for_frames, "cpu")
+            else list(ys_for_frames)
+        )
+        token_frames = np.array(
+            [int(s) for tok, s in zip(ys_for_frames, timestep) if tok != blank_id],
+            dtype=np.int32,
+        )
     token_conf = np.array([float(x) for x in hyp.token_confidence], dtype=np.float32)
 
     if decoder_type == "ctc":
@@ -338,6 +376,13 @@ def _run_timestamps(m, args):
     w.add_tensor("ts_tdt_token_ids", np.ascontiguousarray(tdt_ids))
     w.add_tensor("ts_tdt_token_frames", np.ascontiguousarray(tdt_frames))
     w.add_tensor("ts_tdt_token_conf", np.ascontiguousarray(tdt_conf))
+    # TDT per-token span = the predicted duration applied to the token
+    # (hyp.token_duration). Used for word-end timing (Task 3) and to validate the
+    # C++ tdt_greedy TokenInfo.span. Only present when NeMo reported durations.
+    if tdt_dur is not None and len(tdt_dur) == len(tdt_ids) and len(tdt_dur) > 0:
+        w.add_tensor(
+            "ts_tdt_token_span", np.ascontiguousarray(np.array(tdt_dur, dtype=np.int32))
+        )
     w.add_string("baseline.tdt_words_json", json.dumps(tdt_words, ensure_ascii=False))
     w.add_string("baseline.tdt_text", tdt_text)
 

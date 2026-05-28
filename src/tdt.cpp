@@ -1,5 +1,6 @@
 #include "tdt.hpp"
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -16,12 +17,29 @@ int argmax(const float* a, int n) {
     }
     return best;
 }
+
+// NeMo's rescaled `max_prob` confidence (method 'max_prob', alpha==1.0):
+//   conf = (N * p_max - 1) / (N - 1),  p_max = softmax(slice)[argmax].
+// Computed numerically from the RAW logit slice a[0..n): p_max is the softmax
+// probability of the argmax over the slice (equivalently exp of the max
+// log_softmax value), and N == n (the slice size = num token classes incl.
+// blank). Stable softmax (subtract the max).
+float max_prob_conf_logits(const float* a, int n, int k) {
+    float mx = a[0];
+    for (int i = 1; i < n; ++i) if (a[i] > mx) mx = a[i];
+    double denom = 0.0;
+    for (int i = 0; i < n; ++i) denom += std::exp((double)a[i] - (double)mx);
+    const double p_max = std::exp((double)a[k] - (double)mx) / denom;
+    const double N = (double)n;
+    return (float)((N * p_max - 1.0) / (N - 1.0));
+}
 } // namespace
 
 std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
                                 const std::vector<float>& enc, int T, int enc_hidden,
                                 const std::vector<int32_t>& durations,
-                                int blank_id, int max_symbols) {
+                                int blank_id, int max_symbols,
+                                std::vector<TokenInfo>* tokens) {
     assert((int)enc.size() == (size_t)T * enc_hidden);
     assert(!durations.empty());
 
@@ -32,6 +50,7 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
     assert(num_dur == joint.num_durations());
 
     std::vector<int32_t> hyp;
+    if (tokens) tokens->clear();
 
     // Committed (non-blank) decoding state and last emitted token.
     PredState committed = pred.zero_state();
@@ -75,6 +94,18 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
             // Commit state + last_token ONLY when k != blank.
             if (k != blank_id) {
                 hyp.push_back((int32_t)k);
+                if (tokens) {
+                    // NeMo per-token metadata (matches GreedyTDTInfer._greedy_decode
+                    // + max_prob confidence):
+                    //   frame = the encoder frame t at emission (hypothesis.timestamp).
+                    //   conf  = max_prob over the TOKEN slice logits[0:vocab+1]
+                    //           (NeMo log_softmaxes that slice; exclude the duration
+                    //           logits). N = token_count = vocab + 1.
+                    //   span  = durations[d_k] (the duration/skip applied to the token).
+                    const float conf = max_prob_conf_logits(logits.data(), token_count, k);
+                    tokens->push_back(TokenInfo{ (int32_t)k, (int32_t)t, conf,
+                                                 (int32_t)skip });
+                }
                 last_token = (int32_t)k;
                 committed = out_state;   // carry the step's new (h', c')
                 emitted_any = true;
