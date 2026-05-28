@@ -1,6 +1,7 @@
 #include "mel.hpp"
 #include "fft.hpp"
 #include "ggml.h"
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -13,8 +14,8 @@ static constexpr double kNormEps = 1e-5;
 MelFrontend::MelFrontend(const ModelLoader& ml) {
     const ParakeetConfig& c = ml.config();
     n_fft_     = (int)c.n_fft;
-    win_       = (int)c.win_length;
     hop_       = (int)c.hop_length;
+    assert((n_fft_ & (n_fft_ - 1)) == 0 && "n_fft must be a power of two for rfft");
     n_mels_    = (int)c.n_mels;
     n_bins_    = n_fft_ / 2 + 1;
     preemph_   = c.preemph;
@@ -34,9 +35,12 @@ MelFrontend::MelFrontend(const ModelLoader& ml) {
         if (wlen == n_fft_) {
             std::memcpy(window_.data(), wd, sizeof(float) * n_fft_);
         } else {
+            assert(wlen <= n_fft_ && "window tensor wider than n_fft — wrong model?");
             const int left = (n_fft_ - wlen) / 2;
-            for (int i = 0; i < wlen && (left + i) < n_fft_; ++i)
+            for (int i = 0; i < wlen && (left + i) < n_fft_; ++i) {
+                if (left + i < 0) continue;
                 window_[left + i] = wd[i];
+            }
         }
     }
 
@@ -52,6 +56,7 @@ MelFrontend::MelFrontend(const ModelLoader& ml) {
 
 void MelFrontend::compute(const std::vector<float>& samples,
                           std::vector<float>& feats, int& n_mels, int& T) const {
+    if (samples.empty()) { n_mels = n_mels_; T = 0; feats.clear(); return; }
     const int S = (int)samples.size();
 
     // ----- Step 2: Preemphasis -----
