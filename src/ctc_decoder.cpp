@@ -3,9 +3,27 @@
 #include "ggml.h"
 #include <cassert>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 
 namespace pk {
+
+namespace {
+// Resolve the CTC head linear-layer tensor (weight or bias). The hybrid
+// EncDecHybridRNNTCTCBPEModel stores it under the `ctc_decoder.` prefix; a
+// standalone EncDecCTCModelBPE (e.g. parakeet-ctc-0.6b) stores the SAME layer
+// under the plain `decoder.` prefix. Try the hybrid name first, then fall back
+// to the standalone name, and raise a clear error if neither exists.
+ggml_tensor* ctc_head_tensor(const ModelLoader& ml, const char* suffix) {
+    const std::string hybrid    = std::string("ctc_decoder.decoder_layers.0.") + suffix;
+    const std::string standalone = std::string("decoder.decoder_layers.0.") + suffix;
+    if (ggml_tensor* t = ml.tensor(hybrid))     return t;
+    if (ggml_tensor* t = ml.tensor(standalone)) return t;
+    throw std::runtime_error(
+        "parakeet: CTC head tensor not found: tried '" + hybrid +
+        "' (hybrid) and '" + standalone + "' (standalone EncDecCTCModelBPE)");
+}
+}  // namespace
 
 CTCDecoder::CTCDecoder(const ModelLoader& ml) : ml_(ml) {
     d_model_     = (int)ml.config().d_model;
@@ -42,8 +60,7 @@ void CTCDecoder::forward(const std::vector<float>& enc, int d_model, int T,
             // Squeeze k=1 dim → reshape to ne[0]=d_model, ne[1]=V.
             // Memory layout of weight: w[k + 1*c + d_model*v] = w[c + d_model*v]
             // So d_model (ne[0]) is fastest → correct for ggml_mul_mat contraction on ne[0].
-            ggml_tensor* w3 = ml.tensor("ctc_decoder.decoder_layers.0.weight");
-            assert(w3 && "missing ctc_decoder weight");
+            ggml_tensor* w3 = ctc_head_tensor(ml, "weight");
             assert(w3->type == GGML_TYPE_F32);
             // Clone weight into compute context preserving ne[] layout.
             const int nd_w = ggml_n_dims(w3);
@@ -57,8 +74,7 @@ void CTCDecoder::forward(const std::vector<float>& enc, int d_model, int T,
             // W: ne[0]=d_model (fastest), ne[1]=V ✓
 
             // ---- Bias: [V] ----
-            ggml_tensor* bsrc = ml.tensor("ctc_decoder.decoder_layers.0.bias");
-            assert(bsrc && "missing ctc_decoder bias");
+            ggml_tensor* bsrc = ctc_head_tensor(ml, "bias");
             assert(bsrc->type == GGML_TYPE_F32);
             ggml_tensor* b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, V);
             std::memcpy(b->data, bsrc->data, (size_t)V * sizeof(float));

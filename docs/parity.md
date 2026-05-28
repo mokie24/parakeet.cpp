@@ -177,6 +177,58 @@ Both fixes honor the GGUF metadata / actual tensors; no model is special-cased.
 Per-stage tensor parity (above) and the 110m end-to-end TDT/CTC transcripts are
 unchanged (all earlier ctests still pass).
 
+## Phase 3.5 — Standalone CTC coverage (xscaling=True, vs NeMo)
+
+The standalone `EncDecCTCModelBPE` checkpoints (`parakeet-ctc-*`) are the first
+end-to-end validation of two paths that no prior checkpoint exercised:
+
+1. **Standalone CTC head name.** A hybrid model stores the CTC linear head at
+   `ctc_decoder.decoder_layers.0.{weight,bias}`; a standalone CTC model stores
+   the SAME layer at `decoder.decoder_layers.0.{weight,bias}`. `pk::CTCDecoder`
+   now tries the hybrid name first and falls back to the standalone name (clear
+   error only if neither exists) — `src/ctc_decoder.cpp`, no model special-cased.
+2. **Encoder xscaling=True.** Every previously validated checkpoint had
+   `xscaling=False`; `parakeet-ctc-0.6b`/`-1.1b` set NeMo's FastConformer
+   `xscale=sqrt(d_model)`. This is the first real exercise of the C++ encoder's
+   `*sqrt(d_model)` branch (`pk::Encoder`, gated on `cfg.xscaling`). It worked
+   **out of the box** — no fix was needed; both transcripts matched NeMo exactly.
+
+### Model `info` (config read from the GGUF metadata)
+
+| Model | arch | d_model / layers / heads | mels | conv norm | xscaling | vocab | CTC head tensor |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `parakeet-ctc-0.6b` | `ctc` | 1024 / 24 / 8 | 80 | batch_norm | **true** | 1024 | `decoder.decoder_layers.0.*` |
+| `parakeet-ctc-1.1b` | `ctc` | 1024 / 42 / 8 | 80 | batch_norm | **true** | 1024 | `decoder.decoder_layers.0.*` |
+
+### NeMo vs C++ transcripts + WER (`tests/fixtures/speech.wav`)
+
+| Model | NeMo (CTC) | C++ `parakeet-cli transcribe --decoder ctc` | WER |
+| --- | --- | --- | --- |
+| `parakeet-ctc-0.6b` | `well i don't wish to see it any more observed phoebe turning away her eyes it is certainly very like the old portrait` | `well i don't wish to see it any more observed phoebe turning away her eyes it is certainly very like the old portrait` | **0.0** |
+| `parakeet-ctc-1.1b` | `well i don't wish to see it any more observed phoebe turning away her eyes it is certainly very like the old portrait` | `well i don't wish to see it any more observed phoebe turning away her eyes it is certainly very like the old portrait` | **0.0** |
+
+Both are **byte-for-byte identical** to NeMo (0 edits over 23 reference words).
+These standalone CTC models emit lowercase, unpunctuated text (their own
+tokenizer/training), distinct from the cased/punctuated hybrid + TDT models — and
+the C++ port faithfully reproduces each model's own output. Validated with the
+reusable harness `scripts/validate_vs_nemo.py`:
+
+```bash
+.venv/bin/python scripts/convert_parakeet_to_gguf.py \
+    --model nvidia/parakeet-ctc-0.6b --output /tmp/val_ctc06.gguf
+./build/examples/cli/parakeet-cli info /tmp/val_ctc06.gguf   # arch=ctc, xscaling=true
+.venv/bin/python scripts/validate_vs_nemo.py \
+    --model nvidia/parakeet-ctc-0.6b --gguf /tmp/val_ctc06.gguf \
+    --audio tests/fixtures/speech.wav --head ctc
+# -> MODEL nvidia/parakeet-ctc-0.6b HEAD ctc arch=ctc xscaling=true WER 0.0000 ... PASS
+```
+
+The harness loads the NeMo model, auto-selects the head (CTC model→ctc,
+RNNT/TDT→rnnt, hybrid→transducer), gets the NeMo reference via `m.transcribe`,
+shells out to `parakeet-cli transcribe` (head ctc→`--decoder ctc`,
+rnnt/tdt→`--decoder tdt`), computes word-level WER, and exits 0 on PASS / 1 on
+WER>0 / 77 if NeMo can't be imported.
+
 ## Test suite status
 
 `ctest --test-dir build --output-on-failure` (with `PARAKEET_TEST_GGUF`,
