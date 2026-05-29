@@ -3,42 +3,10 @@
 #include "common.hpp"
 #include "ggml.h"
 #include <atomic>
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
 #include <memory>
 #include <mutex>
 
 namespace pk {
-
-// --- Temporary profiling (env PARAKEET_GRAPH_PROFILE=1): quantify per-call
-// init/compute churn vs actual compute. With the persistent backend the
-// "init+alloc" and "free" buckets should collapse (we no longer ggml_init a
-// data context nor free a per-call compute buffer); only metadata-context
-// init/alloc and graph build remain in the "init" bucket. Not committed long
-// term (Task 5 removes it). ---
-namespace {
-std::atomic<long long> g_calls{0}, g_init_ns{0}, g_compute_ns{0}, g_free_ns{0};
-struct ProfileDumper {
-    ~ProfileDumper() {
-        if (!std::getenv("PARAKEET_GRAPH_PROFILE")) return;
-        long long c = g_calls.load(), in = g_init_ns.load(),
-                  co = g_compute_ns.load(), fr = g_free_ns.load();
-        if (c == 0) return;
-        double tot = (in + co + fr) / 1e6;
-        std::fprintf(stderr,
-            "[graph-profile] run_graph calls=%lld  total=%.1fms  "
-            "init+build=%.1fms(%.0f%%)  compute=%.1fms(%.0f%%)  readback=%.1fms(%.0f%%)\n",
-            c, tot, in/1e6, 100.0*in/(in+co+fr), co/1e6, 100.0*co/(in+co+fr),
-            fr/1e6, 100.0*fr/(in+co+fr));
-    }
-} g_profile_dumper;
-inline bool prof() { static bool on = std::getenv("PARAKEET_GRAPH_PROFILE") != nullptr; return on; }
-using clk = std::chrono::steady_clock;
-inline long long ns(clk::time_point a, clk::time_point b) {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count();
-}
-} // namespace
 
 // Process-global compute-thread override. 0 == unset (use the default thread
 // count). Atomic so it is safe to set from one thread and read from the compute
@@ -110,19 +78,9 @@ bool run_graph(size_t /*mem_bytes*/, int n_threads,
         g_backend_threads = n_threads;
     }
 
-    const bool p = prof();
-    clk::time_point t0 = p ? clk::now() : clk::time_point{};
     // Backend::compute builds the graph in a no_alloc context, allocates via the
     // persistent gallocr, pushes inputs AFTER alloc, computes, and reads back.
-    bool ok = be.compute(build, out);
-    if (p) {
-        clk::time_point t1 = clk::now();
-        g_calls.fetch_add(1, std::memory_order_relaxed);
-        // We no longer split init/compute/free inside compute(); attribute the
-        // whole call to "compute" since the per-call init/free churn is gone.
-        g_compute_ns.fetch_add(ns(t0, t1), std::memory_order_relaxed);
-    }
-    return ok;
+    return be.compute(build, out);
 }
 
 } // namespace pk

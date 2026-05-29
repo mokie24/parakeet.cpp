@@ -94,11 +94,6 @@ static int cmd_transcribe_stream(const std::string& model, const std::string& in
         std::vector<pk::Word> all_words;  // collected for the --timestamps recap
         std::printf("[stream] ");
         std::fflush(stdout);
-        // Optional streaming-proc timer (PARAKEET_STREAM_PROFILE=1): times ONLY the
-        // chunk loop + finalize (model already loaded), so the streaming-specific
-        // fusion win can be measured without the one-time load cost.
-        const bool stream_prof = std::getenv("PARAKEET_STREAM_PROFILE") != nullptr;
-        auto sp_t0 = std::chrono::steady_clock::now();
         pk::run_stream_over_pcm(
             sess, ml, audio.samples,
             [&](const std::string& new_text, const std::vector<pk::EouEvent>& evs,
@@ -117,14 +112,6 @@ static int cmd_transcribe_stream(const std::string& model, const std::string& in
         // Flush the end-of-stream tail (no extra <EOU> is fabricated if NeMo's
         // streaming would not emit one for this clip).
         std::string tail = sess.finalize();
-        if (stream_prof) {
-            double sp_ms = std::chrono::duration<double, std::milli>(
-                               std::chrono::steady_clock::now() - sp_t0).count();
-            double audio_sec = (double)audio.samples.size() / 16000.0;
-            std::fprintf(stderr,
-                "[stream-profile] audio=%.2fs proc=%.1fms RTFx=%.2f\n",
-                audio_sec, sp_ms, (sp_ms > 0.0) ? (audio_sec * 1000.0 / sp_ms) : 0.0);
-        }
         if (!tail.empty()) std::printf("%s", tail.c_str());
         if (timestamps) {
             // The trailing open word finalizes only at finalize(); drain it now.
