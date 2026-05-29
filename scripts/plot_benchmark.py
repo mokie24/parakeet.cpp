@@ -62,7 +62,10 @@ def load_threads(results_dir: Path) -> list[dict] | None:
     p = results_dir / "threads.json"
     if p.exists():
         with open(p) as f:
-            return json.load(f)
+            d = json.load(f)
+        # The runner writes {"model",...,"sweep":[{threads,nemo,ours}, ...]};
+        # accept either that or a bare list.
+        return d["sweep"] if isinstance(d, dict) and "sweep" in d else d
     return None
 
 
