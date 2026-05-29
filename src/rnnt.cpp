@@ -72,18 +72,32 @@ std::vector<int32_t> rnnt_decode_frames(const PredictionNet& pred, const Joint& 
     PredState out_state;
     std::vector<float> logits;
 
+    // Prediction-net output cache. `g` (and the resulting `out_state`) depend
+    // ONLY on the committed (last_token, lstm_state), which change exclusively on
+    // an emit. The RNN-T loop visits every encoder frame and emits blank on most
+    // of them (advancing time without changing the hypothesis), so recomputing
+    // the LSTM each frame repeats an identical forward pass. Cache it and only
+    // recompute after an emit — this is what NeMo's GreedyRNNTInfer does, and it
+    // collapses the LSTM from ~T+U forwards to ~U (the dominant decode cost).
+    bool g_valid = false;
+
     int t = 0;
     while (t < Tnew) {
         int emitted = 0;
         while (emitted < max_symbols) {
-            // First step (no token committed yet, EVER across the whole stream)
-            // uses SOS; otherwise feed the last EMITTED token. The committed
-            // state / last_token / have_token are carried in `st` across chunks.
-            const bool is_sos = !st.have_token;
-            const int32_t last_label = st.have_token ? st.last_token : blank_id;
-
-            // Prediction net single step from the committed state.
-            pred.step(last_label, is_sos, st.state, g, out_state);
+            // Prediction net step from the committed state — only when the cache
+            // is stale (first step, or the previous iteration emitted). On a
+            // blank frame the committed state is unchanged, so `g`/`out_state`
+            // from the prior step are reused verbatim.
+            if (!g_valid) {
+                // First step (no token committed yet, EVER across the whole
+                // stream) uses SOS; otherwise feed the last EMITTED token. The
+                // committed state / last_token / have_token are carried in `st`.
+                const bool is_sos = !st.have_token;
+                const int32_t last_label = st.have_token ? st.last_token : blank_id;
+                pred.step(last_label, is_sos, st.state, g, out_state);
+                g_valid = true;
+            }
 
             // Joint for (t,u): precomputed enc_proj[t] x g -> raw logits [V_plus].
             joint.step_logits(enc_proj.data() + (size_t)t * H,
@@ -109,6 +123,7 @@ std::vector<int32_t> rnnt_decode_frames(const PredictionNet& pred, const Joint& 
             st.last_token = (int32_t)k;
             st.state = out_state;
             st.have_token = true;
+            g_valid = false;   // committed state advanced -> recompute g next step
             emitted += 1;
         }
 

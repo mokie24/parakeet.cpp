@@ -69,6 +69,12 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
     PredState out_state;
     std::vector<float> logits;
 
+    // Prediction-net output cache: `g`/`out_state` depend only on the committed
+    // (last_token, lstm_state), which change exclusively on an emit (k != blank).
+    // Steps that don't emit reuse the cached forward pass instead of recomputing
+    // the LSTM. See the RNN-T loop for the full rationale.
+    bool g_valid = false;
+
     int t = 0;
     while (t < T) {
         int symbols_added = 0;
@@ -76,13 +82,15 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
         int skip = 0;
 
         while (need_loop && symbols_added < max_symbols) {
-            // First step (no token emitted, no committed state) uses SOS;
-            // otherwise feed the last EMITTED token.
-            const bool is_sos = !emitted_any;
-            const int32_t last_label = emitted_any ? last_token : blank_id;
-
-            // Prediction net single step from the committed state.
-            pred.step(last_label, is_sos, committed, g, out_state);
+            // Prediction net step from the committed state — only when the cache
+            // is stale (first step, or the previous step emitted). SOS until the
+            // first emit; otherwise feed the last EMITTED token.
+            if (!g_valid) {
+                const bool is_sos = !emitted_any;
+                const int32_t last_label = emitted_any ? last_token : blank_id;
+                pred.step(last_label, is_sos, committed, g, out_state);
+                g_valid = true;
+            }
 
             // Joint for (t,u): precomputed enc_proj[t] x g -> raw logits [V_plus].
             // `t` is always in [0, T): the outer loop guards the first inner
@@ -116,8 +124,9 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
                 last_token = (int32_t)k;
                 committed = out_state;   // carry the step's new (h', c')
                 emitted_any = true;
+                g_valid = false;         // committed state advanced -> recompute g
             }
-            // else: discard out_state; committed/last_token unchanged.
+            // else: discard out_state; committed/last_token unchanged (g stays valid).
 
             symbols_added += 1;
             t += skip;
