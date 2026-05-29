@@ -12,7 +12,7 @@
 | Component | Version / notes |
 |-----------|-----------------|
 | NeMo | 2.7.3 (PyTorch CPU) |
-| parakeet.cpp ggml engine | this repo — GGUF dtypes: f32, q8_0, q6_k, q5_k, q4_k |
+| parakeet.cpp ggml engine | this repo — GGUF dtypes: f32, f16, q8_0, q6_k, q5_k, q4_k |
 
 ### Audio sets
 | Set | Description |
@@ -37,16 +37,16 @@
 
 | Model | RTFx NeMo | RTFx f32 | Speedup f32 | RTFx q8_0 | Speedup q8_0 | WER NeMo % | WER f32 % | Agree f32 % | RSS NeMo MB | RSS f32 MB |
 |---|---|---|---|---|---|---|---|---|---|---|
-| ctc-0.6b | 30.7 | 41.0 | 1.34× | 46.1 | 1.50× | 4.33 | 4.33 | 0.0000 | 5447 | 2457 |
-| ctc-1.1b | 17.8 | 26.7 | 1.50× | 29.8 | 1.67× | 4.73 | 4.75 | 0.0222 | 8914 | 4202 |
-| rnnt-0.6b | 24.3 | 34.8 | 1.43× | 37.9 | 1.56× | 4.41 | 4.41 | 0.0000 | 5516 | 2487 |
-| rnnt-1.1b | 15.3 | 23.2 | 1.52× | 25.7 | 1.68× | 4.26 | 4.26 | 0.0000 | 8982 | 4232 |
-| tdt-0.6b-v2 | 22.4 | 31.6 | 1.41× | 35.0 | 1.57× | 3.71 | 3.71 | 0.0000 | 5499 | 2545 |
-| tdt-0.6b-v3 | 21.2 | 28.1 | 1.32× | 32.1 | 1.51× | 3.40 | 3.41 | 0.0143 | 5598 | 2581 |
-| tdt-1.1b | 14.6 | 21.9 | 1.49× | 24.3 | 1.66× | 2.51 | 2.51 | 0.0000 | 8956 | 4232 |
-| tdt_ctc-1.1b | 13.3 | 22.3 | 1.67× | 24.7 | 1.86× | 2.61 | 2.55 | 0.0985 | 8909 | 4236 |
-| tdt_ctc-110m | 72.9 | 84.6 | 1.16× | 86.6 | 1.19× | 3.48 | 3.46 | 0.0196 | 1650 | 564 |
-| rt-eou-120m-v1 | 61.8 | 71.9 | 1.16× | 75.3 | 1.22× | 10.92 | 10.92 | 0.0000 | 1714 | 621 |
+| ctc-0.6b | 30.7 | 41.7 | 1.36× | 49.5 | 1.61× | 4.33 | 4.33 | 0.0000 | 5447 | 2457 |
+| ctc-1.1b | 17.8 | 26.1 | 1.46× | 29.0 | 1.63× | 4.73 | 4.75 | 0.0222 | 8914 | 4201 |
+| rnnt-0.6b | 24.3 | 34.1 | 1.40× | 37.0 | 1.52× | 4.41 | 4.41 | 0.0000 | 5516 | 2487 |
+| rnnt-1.1b | 15.3 | 21.4 | 1.40× | 24.0 | 1.57× | 4.26 | 4.26 | 0.0000 | 8982 | 4231 |
+| tdt-0.6b-v2 | 22.4 | 32.4 | 1.45× | 34.7 | 1.55× | 3.71 | 3.71 | 0.0000 | 5499 | 2545 |
+| tdt-0.6b-v3 | 21.2 | 29.7 | 1.40× | 34.4 | 1.62× | 3.40 | 3.41 | 0.0143 | 5598 | 2582 |
+| tdt-1.1b | 14.6 | 22.6 | 1.54× | 25.5 | 1.74× | 2.51 | 2.51 | 0.0000 | 8956 | 4231 |
+| tdt_ctc-1.1b | 13.3 | 22.5 | 1.69× | 25.2 | 1.89× | 2.61 | 2.55 | 0.0985 | 8909 | 4236 |
+| tdt_ctc-110m | 72.9 | 81.1 | 1.11× | 91.5 | 1.26× | 3.48 | 3.46 | 0.0196 | 1650 | 563 |
+| rt-eou-120m-v1 | 61.8 | 70.6 | 1.14× | 76.1 | 1.23× | 10.92 | 10.92 | 0.0000 | 1714 | 621 |
 
 > **Speedup** = ours RTFx / NeMo RTFx (>1 = faster than NeMo). f32 reproduces NeMo's transcript (agreement ≈ 0).
 
@@ -57,10 +57,11 @@ Averaged over all models (LibriSpeech). Size is the mean GGUF size as a fraction
 | dtype | avg size vs f32 | mean speedup vs NeMo | mean WER vs truth % | mean agreement vs NeMo % |
 |---|---|---|---|---|
 | f32 | 100% | 1.40× | 4.43 | 0.015 |
-| q8_0 | 37% | 1.54× | 4.47 | 0.160 |
-| q6_k | 32% | 1.21× | 4.41 | 0.438 |
-| q5_k | 29% | 1.03× | 4.42 | 0.451 |
-| q4_k | 26% | 1.18× | 4.21 | 1.084 |
+| f16 | 57% | 1.70× | 4.43 | 0.015 |
+| q8_0 | 37% | 1.56× | 4.47 | 0.160 |
+| q6_k | 32% | 1.27× | 4.41 | 0.438 |
+| q5_k | 29% | 1.05× | 4.42 | 0.451 |
+| q4_k | 26% | 1.25× | 4.21 | 1.084 |
 
 > f32 is the faithful reference (agreement ≈ 0). q8_0 is near-lossless; K-quants (q6_k→q4_k) shrink the model further at a small, monotonic accuracy cost. See the per-model quant plots below.
 
@@ -417,7 +418,7 @@ Transcripts from the **diverse** clip set (no ground truth for most). NeMo vs pa
 parakeet.cpp reproduces NeMo with high fidelity: mean f32 agreement WER is **0.0155%** — effectively byte-identical output, and WER vs ground truth tracks NeMo. The faithful path (f32) is the reference; quantization is opt-in for size.
 
 ### Performance
-parakeet.cpp is **faster than NeMo on all 10 models** (mean f32 speedup **1.40×**, q8_0 **1.54×**; best: `tdt_ctc-1.1b` at 1.67×). The decisive decode-side win was caching the transducer prediction-net forward pass across non-emitting frames (the LSTM was ~97% of RNN-T decode time and mostly redundant); the encoder side uses a persistent ggml backend + gallocr, zero-copy weights, a single fused graph, and tinyBLAS (GGML_LLAMAFILE).
+parakeet.cpp is **faster than NeMo on all 10 models** (mean f32 speedup **1.40×**, q8_0 **1.56×**; best: `tdt_ctc-1.1b` at 1.69×). The decisive decode-side win was caching the transducer prediction-net forward pass across non-emitting frames (the LSTM was ~97% of RNN-T decode time and mostly redundant); the encoder side uses a persistent ggml backend + gallocr, zero-copy weights, a single fused graph, and tinyBLAS (GGML_LLAMAFILE).
 
 ### Memory
 The ggml engine uses markedly less peak RAM than NeMo/PyTorch, and quantization lowers it further — q8_0 is near-lossless, while K-quants (q6_k→q4_k) keep shrinking the model on disk and in RAM at a small, monotonic accuracy cost (see the quantization plots).
