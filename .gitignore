@@ -1,5 +1,6 @@
 /build*/
 /.venv/
+/third_party/.ggml-patch.lock
 /models/*
 !/models/MANIFEST.md
 *.gguf

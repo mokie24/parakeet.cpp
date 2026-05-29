@@ -19,6 +19,37 @@ set(GGML_CUDA    ${PARAKEET_GGML_CUDA}   CACHE BOOL "" FORCE)
 set(GGML_METAL   ${PARAKEET_GGML_METAL}  CACHE BOOL "" FORCE)
 set(GGML_VULKAN  ${PARAKEET_GGML_VULKAN} CACHE BOOL "" FORCE)
 set(GGML_HIPBLAS ${PARAKEET_GGML_HIPBLAS} CACHE BOOL "" FORCE)
+
+# Performance: -march=native (GGML_NATIVE) and tinyBLAS SGEMM (GGML_LLAMAFILE)
+# give meaningful free speedups (~30% and ~25% per the rt-detr.cpp benchmarks).
+# Force them on unless the caller explicitly overrides.
+if(NOT DEFINED GGML_NATIVE)
+  set(GGML_NATIVE ON CACHE BOOL "ggml: optimize the build for the current system" FORCE)
+endif()
+if(NOT DEFINED GGML_LLAMAFILE)
+  set(GGML_LLAMAFILE ON CACHE BOOL "ggml: use LLAMAFILE (tinyBLAS SGEMM)" FORCE)
+endif()
+
+# Apply any in-tree ggml patches (broadcast-fold, etc.) before configuring the
+# submodule so the patched source is compiled in. Idempotent: already-applied
+# patches are silently skipped.
+find_program(BASH_EXECUTABLE bash)
+if(BASH_EXECUTABLE AND EXISTS "${CMAKE_SOURCE_DIR}/scripts/apply_ggml_patches.sh")
+  execute_process(
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/apply_ggml_patches.sh"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    RESULT_VARIABLE _patch_result
+    OUTPUT_VARIABLE _patch_output
+    ERROR_VARIABLE  _patch_errors
+  )
+  if(_patch_output)
+    message(STATUS "${_patch_output}")
+  endif()
+  if(_patch_result)
+    message(WARNING "apply_ggml_patches.sh returned ${_patch_result}: ${_patch_errors}")
+  endif()
+endif()
+
 add_subdirectory(third_party/ggml)
 
 set(PARAKEET_SRC
