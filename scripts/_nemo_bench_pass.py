@@ -61,6 +61,8 @@ def main() -> int:
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--head", choices=["ctc", "rnnt"], required=True)
     ap.add_argument("--threads", type=int, required=True)
+    ap.add_argument("--device", default="cpu",
+                    help="torch device for NeMo (cpu | cuda). Default cpu.")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -81,12 +83,13 @@ def main() -> int:
     t0 = time.perf_counter()
     try:
         if is_local:
-            m = ASRModel.restore_from(args.model, map_location="cpu")
+            m = ASRModel.restore_from(args.model, map_location=args.device)
         else:
-            m = ASRModel.from_pretrained(args.model, map_location="cpu")
+            m = ASRModel.from_pretrained(args.model, map_location=args.device)
     except Exception as e:  # pragma: no cover - network/cache guard
         print(f"nemo-bench: model load failed: {e}", file=sys.stderr)
         return 77
+    m = m.to(args.device)
     m.eval()
     load_s = time.perf_counter() - t0
 
@@ -105,6 +108,16 @@ def main() -> int:
             )
 
     paths = _read_manifest(args.manifest)
+
+    # Warm up once (untimed) so the first timed transcribe doesn't pay GPU JIT /
+    # cuDNN autotune / lazy-init costs. Essential for fair GPU RTFx (the first
+    # call is ~100x slower than steady state on CUDA).
+    if paths:
+        try:
+            m.transcribe([paths[0]], batch_size=1)
+        except Exception:
+            pass
+
     files = []
     for p in paths:
         asec = _audio_sec(p)

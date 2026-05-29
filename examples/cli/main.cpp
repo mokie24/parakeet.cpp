@@ -563,6 +563,17 @@ static int cmd_bench(int argc, char** argv) {
     std::vector<FileResult> results;
     results.reserve(paths.size());
 
+    // Warm up once (untimed): the first transcribe pays one-time costs — lazy
+    // device weight upload + CUDA kernel/cuBLAS init on a GPU backend (~100x the
+    // steady-state per-file time), or weight realization on CPU. Excluding it
+    // keeps per-file proc_ms (and RTFx) steady-state and fair vs other engines.
+    {
+        pk::Audio warm;
+        if (pk::load_audio_16k_mono(paths[0], warm)) {
+            (void)m->transcribe_pcm(warm.samples, 16000, dec);
+        }
+    }
+
     for (const std::string& p : paths) {
         pk::Audio audio;
         if (!pk::load_audio_16k_mono(p, audio)) {
