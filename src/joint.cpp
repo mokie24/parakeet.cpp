@@ -74,8 +74,8 @@ void Joint::step_logits(const float* enc_proj_t,
     // hot cost and are memory-bandwidth bound (the H->V weight is ~2.6 MB read
     // every step); ggml's matmul parallelizes the output dimension across the
     // worker threads, hitting much higher aggregate memory bandwidth than a
-    // single-threaded C++ matvec — measured ~3x faster on the decode loop. The
-    // enc_proj input is the precomputed projection row for frame t.
+    // single-threaded C++ matvec — measured ~15x faster per step (26us vs 389us)
+    // on the 110m. The enc_proj input is the precomputed projection row for t.
     bool ok = pk::run_graph(0, 0,
         [&](ggml_context* ctx) -> ggml_tensor* {
             // enc_proj row for frame t: [H].
