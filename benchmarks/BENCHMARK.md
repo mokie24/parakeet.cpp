@@ -428,4 +428,27 @@ The ggml engine uses markedly less peak RAM than NeMo/PyTorch, and quantization 
 - NeMo is the unchanged reference (re-running its slow CPU pass reproduces the same numbers); only the ggml engine was re-measured for this refresh.
 - Thread scaling (threads.json) shows 8 threads as the sweet spot on this 20-core host.
 
+## GPU — GB10 Grace-Blackwell (NeMo-GPU vs ours-GPU)
 
+Same-box comparison on the NVIDIA **GB10** (Grace-Blackwell, sm_121, CUDA 13, unified memory). NeMo runs in the `nvcr.io/nvidia/nemo:25.09` container (torch 2.8/cu13, the only stack with Blackwell support); ours runs the native CUDA build (`-DPARAKEET_GGML_CUDA=ON`). Both warmed up once, batch=1, 100-utt LibriSpeech, `local-ai` stopped during the run. NeMo-on-CPU isn't comparable here (different stack) — this is GPU-vs-GPU. RTFx is the **median of 3 passes**; the tight per-pass spread (~2–5%) confirms the differences are real, not run-to-run noise.
+
+| Model | NeMo-GPU RTFx | ours-GPU RTFx (spread) | speedup | agreement WER % |
+|---|---|---|---|---|
+| tdt_ctc-1.1b | 33.9 | 122.9 (122–123) | 3.62× | 0.099 |
+| tdt-1.1b | 62.6 | 125.1 (123–125) | 2.00× | 0.000 |
+| rt-eou-120m | 192.9 | 234.9 (234–237) | 1.22× | 0.000 |
+| rnnt-1.1b | 121.5 | 119.9 (119–121) | 0.99× | 0.000 |
+| rnnt-0.6b | 166.7 | 161.0 (157–164) | 0.97× | 0.000 |
+| ctc-1.1b | 153.4 | 147.4 (145–150) | 0.96× | 0.022 |
+| tdt_ctc-110m | 311.3 | 296.2 (292–303) | 0.95× | 0.023 |
+| ctc-0.6b | 244.1 | 221.0 (214–223) | 0.91× | 0.000 |
+| tdt-0.6b-v3 | 159.9 | 144.4 (140–145) | 0.90× | 0.014 |
+| tdt-0.6b-v2 | 173.5 | 155.0 (153–157) | 0.89× | 0.000 |
+
+> Median speedup **0.96×** (mean **1.34×**, pulled up by the large TDT/hybrid models). Agreement WER ≈ 0 ⇒ ours-GPU reproduces NeMo-GPU transcripts byte-for-byte. On GPU both engines are fast (100–300 RTFx). The picture by class:
+> - **Large TDT/hybrid (tdt-1.1b, tdt_ctc-1.1b): ours 2–3.6× faster.** NeMo's Python per-frame TDT greedy decode bottlenecks once the GPU makes the encoder near-instant; our C++ decode loop doesn't.
+> - **CTC / small / TDT-0.6b: ours ~0.89–0.97× (a stable ~3–11% deficit).** Here the encoder dominates and there's no heavy decode loop, so two costs show: our log-mel front-end runs on the host CPU (+H2D copy) while NeMo extracts features on-GPU, and ggml's generic CUDA conv/attention kernels trail NeMo's tuned cuDNN. Both are clear optimization targets (GPU mel, kernel tuning).
+
+![GB10 GPU RTFx](plots/gpu_rtfx.png)
+
+![GB10 GPU speedup](plots/gpu_speedup.png)
