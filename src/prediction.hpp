@@ -77,13 +77,10 @@ private:
     int vocab_p1_; // vocab + 1 (embedding rows)
     int n_layers_; // pred_rnn_layers (stacked LSTM layers)
 
-    // Single LSTM cell step for stacked-LSTM layer `layer`, shared by forward()
-    // and step(). x[H]: this layer's input (embedding for layer 0, the previous
-    // layer's h' for layer>0); h_in[H], c_in[H]: this layer's previous state.
-    // h_out[H], c_out[H]: this layer's new state (written in-place).
-    void lstm_cell(int layer, const float* x,
-                   const float* h_in, const float* c_in,
-                   float* h_out, float* c_out) const;
+    // Host-side copy of the embedding table, lazily fetched on the first step()
+    // via ggml_backend_tensor_get (works for both CPU and device-resident
+    // weights). [vocab_p1_ * H_], row-major: embed_host_[id*H_ + h].
+    mutable std::vector<float> embed_host_;
 };
 
 } // namespace pk
