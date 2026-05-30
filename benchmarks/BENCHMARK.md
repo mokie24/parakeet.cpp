@@ -10,11 +10,16 @@ parakeet.cpp vs NeMo (PyTorch) on the same GPU (slowed down so the sub-100ms rac
 
 ![parakeet.cpp vs NeMo on GPU](media/gpu_duel.gif)
 
+And on CPU, against NeMo's own PyTorch runtime, about 1.5x faster and still byte-for-byte identical:
+
+![parakeet.cpp vs NeMo on CPU](media/cpu_nemo_duel.gif)
+
+Versus whisper.cpp turbo, same accuracy (WER 1.6% on this clip) and far less compute:
+
 | matchup | result |
 |---------|--------|
-| [vs NeMo (PyTorch), CPU](media/cpu_nemo_duel.mp4) | about 1.5x faster, byte-for-byte identical |
-| [vs whisper.cpp turbo, GPU](media/gpu_whisper_duel.mp4) | about 12x faster, same accuracy (WER 1.6% on this clip) |
-| [vs whisper.cpp turbo, CPU](media/cpu_duel.mp4) | about 27x faster, same accuracy |
+| [vs whisper.cpp turbo, GPU](media/gpu_whisper_duel.mp4) | about 12x faster |
+| [vs whisper.cpp turbo, CPU](media/cpu_duel.mp4) | about 27x faster |
 
 ## Methodology
 
