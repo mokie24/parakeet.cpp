@@ -57,7 +57,7 @@ ggml_tensor* Subsampling::build_graph_batched(ggml_context* ctx,
     // This task targets the NON-causal (offline) model only. Batched causal
     // subsampling (per-stage time masking with a batch axis) is out of scope:
     // the causal branch below still operates on the single-item assumption.
-    assert(!(causal_ && B > 1) && "batched causal subsampling not supported");
+    GGML_ASSERT(!(causal_ && B > 1) && "batched causal subsampling not supported");
 
     // --- Input (host-side): ggml conv data layout is [W=feat, H=T, IC=1, N=B].
     // NeMo conv input is [B,1,T,feat] (H=T, W=feat). We must feed
@@ -194,10 +194,10 @@ ggml_tensor* Subsampling::build_graph_batched(ggml_context* ctx,
         // over ne0 (the C*F' feature axis).
         std::vector<float>& outmask = pool.alloc_f32((size_t)B * Tp);
         for (int b = 0; b < B; ++b) {
-            int vi = (b < (int)valid_in.size()) ? valid_in[b] : -1;
-            int vo = valid_out_len(T, vi);
+            // out_valid[b] == min(valid_out_len(T, vi), Tp); since this loop is
+            // bounded by Tp, "t < out_valid[b]" matches the unclamped "t < vo".
             for (int t = 0; t < Tp; ++t)
-                outmask[(size_t)b * Tp + t] = (t < vo) ? 1.0f : 0.0f;
+                outmask[(size_t)b * Tp + t] = (t < out_valid[b]) ? 1.0f : 0.0f;
         }
         int64_t mk_ne[3] = {1, Tp, B};
         ggml_tensor* mask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 3, mk_ne,
