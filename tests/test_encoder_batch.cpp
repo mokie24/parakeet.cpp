@@ -91,8 +91,11 @@ int main() {
                 s[(size_t)c * Tvalid + t] = full[(size_t)c * Tfull + t];
         return s;
     };
-    std::vector<float> b0   = slice_cols(eo[0], tob, vt[0]);
-    std::vector<float> b1   = slice_cols(eo[1], tob, vt[1]);
+    // forward_batch compacts each eo[b] to its own valid_Tout[b] columns, so its
+    // full row width is vt[b] (not the padded tob). The standalone references
+    // keep their own full Tout (to0 / to1).
+    std::vector<float> b0   = slice_cols(eo[0], vt[0], vt[0]);
+    std::vector<float> b1   = slice_cols(eo[1], vt[1], vt[1]);
     std::vector<float> ref0 = slice_cols(e0, to0, vt[0]);
     std::vector<float> ref1 = slice_cols(e1, to1, vt[1]);
 

@@ -34,10 +34,12 @@ public:
 
     // Batched encoder. Runs all B clips through ONE fused ggml graph
     // (subsampling -> conformer stack -> output). Returns per-item encoder
-    // outputs, each row-major [d_model, Tout_b] (channels-first), the same
-    // orientation as forward(). `d_model` and `Tout` (the padded T') are filled;
-    // `valid_Tout` holds each item's non-pad output-frame count (size B). For
-    // B=1 this reduces to forward().
+    // outputs, each row-major [d_model, valid_Tout[b]] (channels-first), the same
+    // orientation as forward(): each enc_outs[b] is compacted to that item's
+    // non-pad frame count so its row stride equals valid_Tout[b] (pad-derived
+    // trailing frames are dropped). `d_model` and `Tout` (the padded T') are
+    // filled; `valid_Tout` holds each item's non-pad output-frame count (size B).
+    // For B=1 this reduces to forward().
     void forward_batch(const MelBatch& mels,
                        std::vector<std::vector<float>>& enc_outs,
                        int& d_model, int& Tout,

@@ -148,12 +148,22 @@ void Encoder::forward_batch(const MelBatch& mels,
     d_model = d_model_;
     Tout = Tp;
     valid_Tout = vout;
-    enc_outs.assign(mels.B, std::vector<float>((size_t)d_model_ * Tp));
-    for (int b = 0; b < mels.B; ++b)
-        for (int t = 0; t < Tp; ++t)
+    // Each enc_outs[b] is channels-first [d_model, valid_Tout[b]]: compact to the
+    // per-item non-pad frame count so the row stride equals valid_Tout[b]. The
+    // fused graph runs every item at the padded width Tp, but the trailing
+    // (Tp - vout[b]) columns are pad-derived; emitting them would (a) make the
+    // row stride differ from valid_Tout[b] (decoders index enc_out[c*Tout + t]
+    // with Tout = valid_Tout[b]) and (b) feed pad frames into the decoder. Both
+    // corrupt a padded (shorter) item's decode.
+    enc_outs.assign(mels.B, std::vector<float>());
+    for (int b = 0; b < mels.B; ++b) {
+        const int tv = vout[b];
+        enc_outs[b].resize((size_t)d_model_ * tv);
+        for (int t = 0; t < tv; ++t)
             for (int c = 0; c < d_model_; ++c)
-                enc_outs[b][(size_t)c * Tp + t] =
+                enc_outs[b][(size_t)c * tv + t] =
                     flat[(((size_t)b * Tp) + t) * d_model_ + c];
+    }
 }
 
 } // namespace pk

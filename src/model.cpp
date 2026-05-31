@@ -166,6 +166,46 @@ std::vector<std::string> Model::transcribe_pcm_batch(
     return transcribe_16k_batch(r, decoder);
 }
 
+// Decode one item's encoder output (channels-first [d_model, Tout]) into a
+// Transcription (text + per-word timestamps + tokens). Mirrors the decode tail
+// of transcribe_16k_with_timestamps exactly.
+static Transcription decode_enc_out_with_timestamps(
+        const ModelLoader& loader, const std::vector<float>& enc_out,
+        int d_model, int Tout, bool use_tdt, float frame_sec) {
+    const ParakeetConfig& cfg = loader.config();
+    Transcription result;
+    std::vector<TokenInfo> toks;
+    if (use_tdt) {
+        std::vector<float> enc_row((size_t)Tout * d_model);
+        for (int t = 0; t < Tout; ++t)
+            for (int c = 0; c < d_model; ++c)
+                enc_row[(size_t)t * d_model + c] = enc_out[(size_t)c * Tout + t];
+        PredictionNet pred(loader);
+        Joint        joint(loader);
+        const int max_symbols = (int)cfg.max_symbols;
+        if (!cfg.tdt_durations.empty())
+            tdt_greedy(pred, joint, enc_row, Tout, d_model, cfg.tdt_durations,
+                       (int)cfg.blank_id, max_symbols, &toks);
+        else
+            rnnt_greedy(pred, joint, enc_row, Tout, d_model,
+                        (int)cfg.blank_id, max_symbols, &toks);
+    } else {
+        CTCDecoder ctc(loader);
+        std::vector<float> logits; int vocab_plus_1 = 0;
+        ctc.forward(enc_out, d_model, Tout, logits, vocab_plus_1);
+        ctc_greedy(logits, Tout, vocab_plus_1, (int)cfg.blank_id, &toks);
+        for (size_t i = 0; i + 1 < toks.size(); ++i)
+            toks[i].span = toks[i + 1].frame - toks[i].frame;
+    }
+    std::vector<int32_t> ids;
+    ids.reserve(toks.size());
+    for (const TokenInfo& ti : toks) ids.push_back(ti.id);
+    result.text   = detokenize(loader.tokenizer_pieces(), ids);
+    result.words  = group_words(toks, loader.tokenizer_pieces(), frame_sec);
+    result.tokens = std::move(toks);
+    return result;
+}
+
 Transcription Model::transcribe_16k_with_timestamps(
     const std::vector<float>& pcm16k, Decoder decoder) const {
     const ParakeetConfig& cfg = loader_.config();
@@ -198,60 +238,65 @@ Transcription Model::transcribe_16k_with_timestamps(
     const bool use_tdt = (decoder == Decoder::kTDT)
         || (decoder == Decoder::kDefault && arch_prefers_tdt(cfg.arch));
 
-    Transcription result;
-    std::vector<TokenInfo> toks;
-
-    if (use_tdt) {
-        // Transpose channels-first [d_model, Tout] -> row-major [Tout, d_model].
-        std::vector<float> enc_row(static_cast<size_t>(Tout) * d_model);
-        for (int t = 0; t < Tout; ++t)
-            for (int c = 0; c < d_model; ++c)
-                enc_row[static_cast<size_t>(t) * d_model + c] = enc_out[static_cast<size_t>(c) * Tout + t];
-
-        PredictionNet pred(loader_);
-        Joint        joint(loader_);
-        const int max_symbols = static_cast<int>(cfg.max_symbols);
-
-        if (!cfg.tdt_durations.empty()) {
-            tdt_greedy(pred, joint, enc_row, Tout, d_model,
-                       cfg.tdt_durations, static_cast<int>(cfg.blank_id),
-                       max_symbols, &toks);
-        } else {
-            rnnt_greedy(pred, joint, enc_row, Tout, d_model,
-                        static_cast<int>(cfg.blank_id), max_symbols, &toks);
-        }
-        // TDT/RNNT TokenInfo.span is already the per-token end-offset extent
-        // (duration for TDT, 1 for RNNT) -> group_words' frame+span rule is
-        // correct as-is.
-    } else {
-        // CTC path: head -> log-probs [Tout, vocab+1].
-        CTCDecoder ctc(loader_);
-        std::vector<float> logits;
-        int vocab_plus_1 = 0;
-        ctc.forward(enc_out, d_model, Tout, logits, vocab_plus_1);
-
-        const int blank_id = static_cast<int>(cfg.blank_id);
-        ctc_greedy(logits, Tout, vocab_plus_1, blank_id, &toks);
-
-        // NeMo CTC word end_offset = the NEXT collapsed token's start frame
-        // (cumulative run lengths), not start+1. ctc_greedy documents span == 1;
-        // rewrite each token's span to (next_frame - frame) so group_words'
-        // `frame + span` rule reproduces NeMo's end_offset exactly. The final
-        // token keeps span == 1 (its true run-length is unknown to the collapse,
-        // and within the 1-frame word-end tolerance).
-        for (size_t i = 0; i + 1 < toks.size(); ++i) {
-            toks[i].span = toks[i + 1].frame - toks[i].frame;
-        }
-    }
-
-    // Detokenize the flat text from the emitted ids.
-    std::vector<int32_t> ids;
-    ids.reserve(toks.size());
-    for (const TokenInfo& ti : toks) ids.push_back(ti.id);
-    result.text   = detokenize(loader_.tokenizer_pieces(), ids);
-    result.words  = group_words(toks, loader_.tokenizer_pieces(), frame_sec);
-    result.tokens = std::move(toks);
+    Transcription result = decode_enc_out_with_timestamps(
+        loader_, enc_out, d_model, Tout, use_tdt, frame_sec);
     return result;
+}
+
+std::vector<Transcription> Model::transcribe_16k_batch_with_timestamps(
+        const std::vector<std::vector<float>>& pcms16k, Decoder decoder) const {
+    const ParakeetConfig& cfg = loader_.config();
+    const float frame_sec =
+        (float)cfg.hop_length * (float)cfg.subsampling_factor / (float)cfg.sample_rate;
+    const bool use_tdt = (decoder == Decoder::kTDT)
+        || (decoder == Decoder::kDefault && arch_prefers_tdt(cfg.arch));
+
+    const bool gpu = std::string(pk::global_backend().device_name()) != "cpu";
+    MelBatch mb;
+    mb.B = (int)pcms16k.size();
+    std::vector<std::vector<float>> feats(mb.B);
+    std::vector<int> Ts(mb.B, 0);
+    int n_mels = 0;
+    for (int b = 0; b < mb.B; ++b) {
+        int nm = 0, T = 0;
+        if (gpu) { GpuMel g(loader_); g.compute(pcms16k[b], feats[b], nm, T); }
+        else     { MelFrontend m(loader_); m.compute(pcms16k[b], feats[b], nm, T); }
+        n_mels = nm; Ts[b] = T;
+    }
+    mb.n_mels = n_mels;
+    mb.T_max = 0;
+    for (int b = 0; b < mb.B; ++b) mb.T_max = std::max(mb.T_max, Ts[b]);
+    mb.valid_T = Ts;
+    mb.data.assign((size_t)mb.B * n_mels * mb.T_max, 0.0f);
+    for (int b = 0; b < mb.B; ++b)
+        for (int m = 0; m < n_mels; ++m)
+            for (int t = 0; t < Ts[b]; ++t)
+                mb.data[((size_t)b * n_mels + m) * mb.T_max + t] =
+                    feats[b][(size_t)m * Ts[b] + t];
+
+    Encoder encoder(loader_);
+    std::vector<std::vector<float>> enc_outs; int d_model = 0, Tout = 0;
+    std::vector<int> valid_Tout;
+    encoder.forward_batch(mb, enc_outs, d_model, Tout, valid_Tout);
+
+    std::vector<Transcription> outs(mb.B);
+    for (int b = 0; b < mb.B; ++b)
+        outs[b] = decode_enc_out_with_timestamps(
+            loader_, enc_outs[b], d_model, valid_Tout[b], use_tdt, frame_sec);
+    return outs;
+}
+
+std::vector<Transcription> Model::transcribe_pcm_batch_with_timestamps(
+        const std::vector<std::vector<float>>& pcms, int sample_rate,
+        Decoder decoder) const {
+    if (sample_rate <= 0) {
+        throw std::runtime_error("parakeet: invalid sample_rate");
+    }
+    std::vector<std::vector<float>> r(pcms.size());
+    for (size_t i = 0; i < pcms.size(); ++i)
+        r[i] = (sample_rate == 16000) ? pcms[i]
+                                      : resample_linear(pcms[i], sample_rate, 16000);
+    return transcribe_16k_batch_with_timestamps(r, decoder);
 }
 
 std::string Model::transcribe_pcm(const std::vector<float>& pcm, int sample_rate,
