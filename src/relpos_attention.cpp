@@ -41,11 +41,23 @@ ggml_tensor* RelPosAttention::build_graph(ggml_context* ctx, ggml_tensor* xt,
                                           int T, ggml_tensor* pe, int pos_len,
                                           int valid_len,
                                           GraphInputPool& pool) const {
+    // Thin adapter: the scalar path is the B=1 case of the batched builder. At
+    // B=1 the 4D ops collapse (ne3=1) and this must stay byte-faithful vs the
+    // old 3D code — guarded by test_relpos_attention (rel-shift correctness).
+    return build_graph_batched(ctx, xt, T, /*B*/1, pe, pos_len,
+                               std::vector<int>{valid_len}, pool);
+}
+
+ggml_tensor* RelPosAttention::build_graph_batched(
+        ggml_context* ctx, ggml_tensor* xt, int T, int B, ggml_tensor* pe,
+        int pos_len, const std::vector<int>& valid_len,
+        GraphInputPool& pool) const {
     const int D  = d_model_;
     const int H  = n_heads_;
     const int dk = d_head_;
     const float scale = 1.0f / std::sqrt((float)dk);
     assert(pos_len == 2 * T - 1);
+    assert((int)valid_len.size() == B);
 
     const std::string pre = "encoder.layers." + std::to_string(layer_idx_) + ".self_attn.";
     const ModelLoader& ml = ml_;
@@ -63,97 +75,123 @@ ggml_tensor* RelPosAttention::build_graph(ggml_context* ctx, ggml_tensor* xt,
         }
         return y;
     };
-    ggml_tensor* q = linear("linear_q.weight", "linear_q.bias", xt); // [D, T]
-    ggml_tensor* k = linear("linear_k.weight", "linear_k.bias", xt); // [D, T]
-    ggml_tensor* v = linear("linear_v.weight", "linear_v.bias", xt); // [D, T]
+    // xt is [D, T, B]; mul_mat batches over ne2 -> q/k/v are [D, T, B]. pe is
+    // shared [D, P] (NO batch) -> p is [D, P].
+    ggml_tensor* q = linear("linear_q.weight", "linear_q.bias", xt); // [D, T, B]
+    ggml_tensor* k = linear("linear_k.weight", "linear_k.bias", xt); // [D, T, B]
+    ggml_tensor* v = linear("linear_v.weight", "linear_v.bias", xt); // [D, T, B]
     ggml_tensor* p = linear("linear_pos.weight", nullptr, pe);       // [D, P]
 
-    // ---- split into heads: [D, *] -> [dk, H, *] -> [dk, *, H] ----
+    // ---- split into heads (batched): [D, n, B] -> [dk, H, n, B] -> [dk, n, H, B] ----
+    auto to_heads_b = [&](ggml_tensor* t, int n) {
+        t = ggml_reshape_4d(ctx, t, dk, H, n, B);              // [dk, H, n, B]
+        t = ggml_cont(ctx, ggml_permute(ctx, t, 0, 2, 1, 3));  // [dk, n, H, B]
+        return t;
+    };
+    // p is shared (no batch) -> keep the 3D head-split: [dk, P, H].
     auto to_heads = [&](ggml_tensor* t, int n) {
         t = ggml_reshape_3d(ctx, t, dk, H, n);                 // [dk, H, n]
         t = ggml_cont(ctx, ggml_permute(ctx, t, 0, 2, 1, 3));  // [dk, n, H]
         return t;
     };
-    ggml_tensor* qh = to_heads(q, T);        // [dk, T, H]
-    ggml_tensor* kh = to_heads(k, T);        // [dk, T, H]
-    ggml_tensor* vh = to_heads(v, T);        // [dk, T, H]
-    ggml_tensor* ph = to_heads(p, pos_len);  // [dk, P, H]
+    ggml_tensor* qh = to_heads_b(q, T);      // [dk, T, H, B]
+    ggml_tensor* kh = to_heads_b(k, T);      // [dk, T, H, B]
+    ggml_tensor* vh = to_heads_b(v, T);      // [dk, T, H, B]
+    ggml_tensor* ph = to_heads(p, pos_len);  // [dk, P, H]  (ne3=1, broadcast over B)
 
-    // ---- pos_bias_u/v: ne [dk, H] -> [dk, 1, H] to broadcast over T ----
+    // ---- pos_bias_u/v: ne [dk, H] -> [dk, 1, H, 1] to broadcast over T and B ----
     ggml_tensor* bu = clone_weight(ctx, ml, pre + "pos_bias_u"); // [dk, H]
     ggml_tensor* bv = clone_weight(ctx, ml, pre + "pos_bias_v"); // [dk, H]
-    bu = ggml_reshape_3d(ctx, bu, dk, 1, H);
-    bv = ggml_reshape_3d(ctx, bv, dk, 1, H);
-    ggml_tensor* qu = ggml_add(ctx, qh, bu); // [dk, T, H]
-    ggml_tensor* qv = ggml_add(ctx, qh, bv); // [dk, T, H]
+    bu = ggml_reshape_4d(ctx, bu, dk, 1, H, 1);
+    bv = ggml_reshape_4d(ctx, bv, dk, 1, H, 1);
+    ggml_tensor* qu = ggml_add(ctx, qh, bu); // [dk, T, H, B]
+    ggml_tensor* qv = ggml_add(ctx, qh, bv); // [dk, T, H, B]
 
-    // ---- ac = q_u @ k^T : ggml_mul_mat([dk,T,H],[dk,T,H]) -> [T_k, T_q, H] ----
-    ggml_tensor* ac = ggml_mul_mat(ctx, kh, qu); // [T(key), T(query), H]
+    // ---- ac = q_u @ k^T : mul_mat([dk,T,H,B],[dk,T,H,B]) -> [T_k, T_q, H, B] ----
+    ggml_tensor* ac = ggml_mul_mat(ctx, kh, qu); // [T(key), T(query), H, B]
 
-    // ---- bd = q_v @ p^T -> [P(pos), T(query), H], then rel_shift -> [T,T,H] ----
-    ggml_tensor* bd = ggml_mul_mat(ctx, ph, qv); // [P, T, H]
-    bd = ggml_pad_ext(ctx, bd, /*lp0*/1, /*rp0*/0, 0,0, 0,0, 0,0); // [P+1=2T, T, H]
-    bd = ggml_reshape_3d(ctx, bd, T, 2 * T, H);                    // [T, 2T, H]
-    bd = ggml_view_3d(ctx, bd, T, 2 * T - 1, H,
-                      bd->nb[1], bd->nb[2], bd->nb[1]);            // [T, 2T-1, H]
+    // ---- bd = q_v @ p^T -> [P, T_q, H, B], then rel_shift -> [T, T, H, B] ----
+    // ph is [dk, P, H] (ne3=1) and broadcasts over the batch (ne3=B) of qv.
+    ggml_tensor* bd = ggml_mul_mat(ctx, ph, qv); // [P, T, H, B]
+    // 4D rel-shift: identical ne0/ne1 stride+offset arithmetic as the 3D path,
+    // with the batch axis threaded through every reshape/view via ne3=B and
+    // nb[3]. ne2/ne3 are passive (no offset on them).
+    bd = ggml_pad_ext(ctx, bd, /*lp0*/1, /*rp0*/0, 0,0, 0,0, 0,0); // [2T, T, H, B]
+    bd = ggml_reshape_4d(ctx, bd, T, 2 * T, H, B);                 // [T, 2T, H, B]
+    bd = ggml_view_4d(ctx, bd, T, 2 * T - 1, H, B,
+                      bd->nb[1], bd->nb[2], bd->nb[3], bd->nb[1]);  // [T, 2T-1, H, B]
     bd = ggml_cont(ctx, bd);
-    bd = ggml_reshape_3d(ctx, bd, 2 * T - 1, T, H);               // [2T-1, T, H]
-    bd = ggml_view_3d(ctx, bd, T, T, H, bd->nb[1], bd->nb[2], 0);
+    bd = ggml_reshape_4d(ctx, bd, 2 * T - 1, T, H, B);            // [2T-1, T, H, B]
+    bd = ggml_view_4d(ctx, bd, T, T, H, B,
+                      bd->nb[1], bd->nb[2], bd->nb[3], 0);         // [T, T, H, B]
     bd = ggml_cont(ctx, bd);
 
     // ---- scores = ac + bd ; softmax(scores*scale + mask) ----
-    ggml_tensor* scores = ggml_add(ctx, ac, bd); // [T_k, T_q, H]
+    ggml_tensor* scores = ggml_add(ctx, ac, bd); // [T_k, T_q, H, B]
 
-    // Additive mask [T_k, T_q]: 0 where query qi may attend to key kj, -inf
-    // otherwise. (1) pad mask: key kj valid iff kj < valid_len. (2) chunked-
-    // limited window for streaming models. See header / NeMo _create_masks.
+    // Per-item additive mask [T_k, T_q, 1, B]: 0 where query qi may attend to key
+    // kj, -inf otherwise. (1) pad mask: key kj valid iff kj < valid_len[b].
+    // (2) chunked-limited window for streaming models. See NeMo _create_masks.
+    // Mask shape is [T, T, 1, B] (ne2=1) so soft_max_ext broadcasts it over the
+    // head axis (ne2=H) while indexing per item on ne3=B. Verified against the
+    // ggml CPU kernel ggml_compute_forward_soft_max_f32: it reads the mask at
+    // i12 = i02 % ne12 (head, here ne12=1 -> always 0) and i13 = i03 % ne13
+    // (batch, here ne13=B -> exact per-item), and ggml_soft_max_impl asserts
+    // a->ne[2] % mask->ne[2] == 0 and a->ne[3] % mask->ne[3] == 0.
     const int chunk_size  = chunked_limited_ ? (att_right_ + 1) : 0;
     const int left_chunks = (chunked_limited_ && chunk_size > 0)
                             ? (att_left_ / chunk_size) : 0;
-    std::vector<float>& mask_host = pool.alloc_f32((size_t)T * T);
+    std::vector<float>& mask_host = pool.alloc_f32((size_t)B * T * T);
     {
         float* md = mask_host.data();
         const float ninf = -INFINITY;
-        for (int qi = 0; qi < T; ++qi) {
-            const int cq = chunked_limited_ ? (qi / chunk_size) : 0;
-            for (int kj = 0; kj < T; ++kj) {
-                bool ok = (kj < valid_len);
-                if (ok && chunked_limited_) {
-                    const int ck = kj / chunk_size;
-                    const int diff = cq - ck;
-                    ok = (diff >= 0 && diff <= left_chunks);
+        for (int b = 0; b < B; ++b) {
+            const int vl = valid_len[b];
+            for (int qi = 0; qi < T; ++qi) {
+                const int cq = chunked_limited_ ? (qi / chunk_size) : 0;
+                for (int kj = 0; kj < T; ++kj) {
+                    bool ok = (kj < vl);
+                    if (ok && chunked_limited_) {
+                        const int ck = kj / chunk_size;
+                        const int diff = cq - ck;
+                        ok = (diff >= 0 && diff <= left_chunks);
+                    }
+                    md[(size_t)b * T * T + (size_t)qi * T + kj] = ok ? 0.0f : ninf;
                 }
-                md[(size_t)qi * T + kj] = ok ? 0.0f : ninf;
             }
         }
     }
-    int64_t mask_ne[2] = {T, T};
-    ggml_tensor* mask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, mask_ne,
+    int64_t mask_ne[4] = {T, T, 1, B};
+    ggml_tensor* mask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 4, mask_ne,
                             mask_host.data(), mask_host.size() * sizeof(float));
-    ggml_tensor* attn = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f); // [T_k, T_q, H]
+    ggml_tensor* attn = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f); // [T_k, T_q, H, B]
 
-    // ---- context = attn @ v -> [dk, T_q, H] ----
-    ggml_tensor* vtk = ggml_cont(ctx, ggml_permute(ctx, vh, 1, 0, 2, 3)); // [T_k, dk, H]
-    ggml_tensor* ctxh = ggml_mul_mat(ctx, vtk, attn); // [dk, T_q, H]
+    // ---- context = attn @ v -> [dk, T_q, H, B] ----
+    ggml_tensor* vtk = ggml_cont(ctx, ggml_permute(ctx, vh, 1, 0, 2, 3)); // [T_k, dk, H, B]
+    ggml_tensor* ctxh = ggml_mul_mat(ctx, vtk, attn); // [dk, T_q, H, B]
 
-    // ---- concat heads: [dk, T, H] -> [dk, H, T] -> [D, T] ----
-    ggml_tensor* merged = ggml_cont(ctx, ggml_permute(ctx, ctxh, 0, 2, 1, 3)); // [dk, H, T]
-    merged = ggml_reshape_2d(ctx, merged, D, T); // [D, T]
+    // ---- concat heads: [dk, T, H, B] -> [dk, H, T, B] -> [D, T, B] ----
+    ggml_tensor* merged = ggml_cont(ctx, ggml_permute(ctx, ctxh, 0, 2, 1, 3)); // [dk, H, T, B]
+    merged = ggml_reshape_3d(ctx, merged, D, T, B); // [D, T, B]
 
     // Zero the context for PADDED query rows (NeMo masks padded query rows fully
-    // -> output reduces to linear_out.bias). Apply a query-row mask [1, T].
-    if (valid_len < T) {
-        std::vector<float>& qmask_host = pool.alloc_f32(T);
-        for (int qi = 0; qi < T; ++qi)
-            qmask_host[qi] = (qi < valid_len) ? 1.0f : 0.0f;
-        int64_t qm_ne[2] = {1, T};
-        ggml_tensor* qmask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, qm_ne,
+    // -> output reduces to linear_out.bias). Apply a per-item query-row mask
+    // [1, T, B] (broadcast over D). Emit only when some item has valid_len < T.
+    bool any_pad = false;
+    for (int b = 0; b < B; ++b) any_pad = any_pad || (valid_len[b] < T);
+    if (any_pad) {
+        std::vector<float>& qmask_host = pool.alloc_f32((size_t)B * T);
+        for (int b = 0; b < B; ++b)
+            for (int qi = 0; qi < T; ++qi)
+                qmask_host[(size_t)b * T + qi] = (qi < valid_len[b]) ? 1.0f : 0.0f;
+        int64_t qm_ne[3] = {1, T, B};
+        ggml_tensor* qmask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 3, qm_ne,
                                  qmask_host.data(), qmask_host.size() * sizeof(float));
         merged = ggml_mul(ctx, merged, qmask); // broadcast over D
     }
 
     // ---- output projection ----
-    return linear("linear_out.weight", "linear_out.bias", merged); // [D, T]
+    return linear("linear_out.weight", "linear_out.bias", merged); // [D, T, B]
 }
 
 void RelPosAttention::forward(const std::vector<float>& x, int T,

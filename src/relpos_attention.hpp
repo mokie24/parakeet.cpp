@@ -41,6 +41,13 @@ public:
                              ggml_tensor* pe, int pos_len, int valid_len,
                              GraphInputPool& pool) const;
 
+    // Batched GRAPH-BUILDER. `xt` is [D, T, B]; `pe` is [D, pos_len] (shared
+    // across the batch). `valid_len` is per item (size B). Returns [D, T, B].
+    ggml_tensor* build_graph_batched(ggml_context* ctx, ggml_tensor* xt, int T,
+                                     int B, ggml_tensor* pe, int pos_len,
+                                     const std::vector<int>& valid_len,
+                                     GraphInputPool& pool) const;
+
     // x: [T, d_model]; pos_emb: [2T-1, d_model]; out: [T, d_model].
     void forward(const std::vector<float>& x, int T,
                  const std::vector<float>& pos_emb, int pos_len,
