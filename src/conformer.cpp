@@ -162,10 +162,11 @@ ConformerLayer::ConformerLayer(const ModelLoader& ml, int layer_idx)
     assert((conv_kernel_ - 1) % 2 == 0 && "depthwise kernel must be odd");
 }
 
-ggml_tensor* ConformerLayer::build_graph(ggml_context* ctx, ggml_tensor* xt,
-                                         int T, ggml_tensor* pe, int pos_len,
-                                         int valid_len,
-                                         GraphInputPool& pool) const {
+ggml_tensor* ConformerLayer::build_graph_batched(ggml_context* ctx,
+                                                 ggml_tensor* xt, int T, int B,
+                                                 ggml_tensor* pe, int pos_len,
+                                                 const std::vector<int>& valid_len,
+                                                 GraphInputPool& pool) const {
     const int D  = d_model_;
     const int K  = conv_kernel_;
     const float ln_eps = 1e-5f;            // LayerNorm eps (NeMo nn.LayerNorm default)
@@ -174,16 +175,17 @@ ggml_tensor* ConformerLayer::build_graph(ggml_context* ctx, ggml_tensor* xt,
     const std::string pre = "encoder.layers." + std::to_string(layer_idx_) + ".";
     const ModelLoader& ml = ml_;
 
-    // LayerNorm over the channel dim (ne0 = D), affine. Input ne [D, T].
+    // LayerNorm over the channel dim (ne0 = D), affine. Input ne [D, T, B];
+    // ggml_norm normalizes ne0 and the affine [D] broadcasts over T and B.
     auto layer_norm = [&](ggml_tensor* in, const std::string& nm) {
         ggml_tensor* g = clone_weight(ctx, ml, pre + nm + ".weight"); // [D]
         ggml_tensor* b = clone_weight(ctx, ml, pre + nm + ".bias");   // [D]
         ggml_tensor* y = ggml_norm(ctx, in, ln_eps);                  // normalize over ne0
-        y = ggml_mul(ctx, y, g);                                      // broadcast [D] over T
+        y = ggml_mul(ctx, y, g);                                      // broadcast [D] over T,B
         y = ggml_add(ctx, y, b);
         return y;
     };
-    // nn.Linear: ggml weight ne = [in, out]. in ne [in, T] -> [out, T].
+    // nn.Linear: ggml weight ne = [in, out]. in ne [in, T, B] -> [out, T, B].
     auto linear = [&](ggml_tensor* in, const std::string& nm, bool bias) {
         ggml_tensor* W = clone_weight(ctx, ml, pre + nm + ".weight");
         ggml_tensor* y = ggml_mul_mat(ctx, W, in);
@@ -193,11 +195,11 @@ ggml_tensor* ConformerLayer::build_graph(ggml_context* ctx, ggml_tensor* xt,
         }
         return y;
     };
-    // ConformerFeedForward: linear1(d->ff) -> SiLU -> linear2(ff->d). in [D, T].
+    // ConformerFeedForward: linear1(d->ff) -> SiLU -> linear2(ff->d). in [D, T, B].
     auto feed_forward = [&](ggml_tensor* in, const std::string& ff) {
-        ggml_tensor* h = linear(in, ff + ".linear1", /*bias*/true); // [FF, T]
+        ggml_tensor* h = linear(in, ff + ".linear1", /*bias*/true); // [FF, T, B]
         h = ggml_silu(ctx, h);                                      // Swish == SiLU
-        h = linear(h, ff + ".linear2", /*bias*/true);               // [D, T]
+        h = linear(h, ff + ".linear2", /*bias*/true);               // [D, T, B]
         return h;
     };
 
@@ -205,19 +207,19 @@ ggml_tensor* ConformerLayer::build_graph(ggml_context* ctx, ggml_tensor* xt,
     ggml_tensor* h1 = layer_norm(xt, "norm_feed_forward1");
     h1 = feed_forward(h1, "feed_forward1");
     h1 = ggml_scale(ctx, h1, 0.5f);          // fc_factor
-    ggml_tensor* r = ggml_add(ctx, xt, h1);  // [D, T]
+    ggml_tensor* r = ggml_add(ctx, xt, h1);  // [D, T, B]
 
     // === Stage B: r = r + self_attn(norm_self_att(r)). ===
     ggml_tensor* attn_in = layer_norm(r, "norm_self_att");
     RelPosAttention attn(ml_, layer_idx_);
-    ggml_tensor* attn_out = attn.build_graph(ctx, attn_in, T, pe, pos_len,
-                                             valid_len, pool); // [D, T]
+    ggml_tensor* attn_out = attn.build_graph_batched(ctx, attn_in, T, B, pe,
+                                             pos_len, valid_len, pool); // [D, T, B]
     r = ggml_add(ctx, r, attn_out);
 
     // === Stage C: r = r + conv(norm_conv(r)). ===
-    ggml_tensor* c = layer_norm(r, "norm_conv"); // [D, T]
-    ggml_tensor* conv_out = build_conv_module(ctx, ml, pre, c, D, T, K, /*B*/1,
-                                              std::vector<int>{valid_len},
+    ggml_tensor* c = layer_norm(r, "norm_conv"); // [D, T, B]
+    ggml_tensor* conv_out = build_conv_module(ctx, ml, pre, c, D, T, K, B,
+                                              valid_len,
                                               conv_norm_type_, conv_causal_, pool);
     r = ggml_add(ctx, r, conv_out);
 
@@ -227,7 +229,17 @@ ggml_tensor* ConformerLayer::build_graph(ggml_context* ctx, ggml_tensor* xt,
     h2 = ggml_scale(ctx, h2, 0.5f);
     r = ggml_add(ctx, r, h2);
     r = layer_norm(r, "norm_out");
-    return r; // [D, T] -> row-major [T, D]
+    return r; // [D, T, B] -> per item row-major [T, D]
+}
+
+// Scalar adapter: B=1 reduction of the batched builder. The fused encoder and
+// the scalar test entry points (forward / forward_with_conv) route through here.
+ggml_tensor* ConformerLayer::build_graph(ggml_context* ctx, ggml_tensor* xt,
+                                         int T, ggml_tensor* pe, int pos_len,
+                                         int valid_len,
+                                         GraphInputPool& pool) const {
+    return build_graph_batched(ctx, xt, T, 1, pe, pos_len,
+                               std::vector<int>{valid_len}, pool);
 }
 
 void ConformerLayer::forward(const std::vector<float>& x, int T,
