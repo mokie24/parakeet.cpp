@@ -45,25 +45,33 @@ int Subsampling::valid_out_len(int T, int in_valid_frames) const {
     return valid;
 }
 
-ggml_tensor* Subsampling::build_graph(ggml_context* ctx,
-                                      const std::vector<float>& mel,
-                                      int n_mels, int T, GraphInputPool& pool,
-                                      int& out_Tp, int& out_valid,
-                                      int in_valid_frames) const {
+ggml_tensor* Subsampling::build_graph_batched(ggml_context* ctx,
+                                      const float* mel,
+                                      int n_mels, int T, int B, GraphInputPool& pool,
+                                      int& out_Tp, std::vector<int>& out_valid,
+                                      const std::vector<int>& valid_in) const {
     const int C = conv_channels_;
     const int F = n_mels;            // feature dim (80)
     const ModelLoader& ml = ml_;
 
-    // --- Input (host-side): ggml conv data layout is [W=feat, H=T, IC=1, N=1].
-    // NeMo conv input is [B,1,T,feat] (H=T, W=feat). We must feed
-    // x[t*F + f] = mel(feat=f, time=t). mel is feat-major [F,T] (mel[m*T + t])
-    // so transpose into time-major in pool-owned storage, then feed as input.
-    std::vector<float>& x_host = pool.alloc_f32((size_t)F * T);
-    for (int t = 0; t < T; ++t)
-        for (int f = 0; f < F; ++f)
-            x_host[(size_t)t * F + f] = mel[(size_t)f * T + t];
+    // This task targets the NON-causal (offline) model only. Batched causal
+    // subsampling (per-stage time masking with a batch axis) is out of scope:
+    // the causal branch below still operates on the single-item assumption.
+    assert(!(causal_ && B > 1) && "batched causal subsampling not supported");
 
-    int64_t x_ne[4] = {F, T, 1, 1};
+    // --- Input (host-side): ggml conv data layout is [W=feat, H=T, IC=1, N=B].
+    // NeMo conv input is [B,1,T,feat] (H=T, W=feat). We must feed
+    // x[(b*T + t)*F + f] = mel(item=b, feat=f, time=t). mel is per-item
+    // feat-major [F,T] (mel[(b*F + f)*T + t]); transpose into time-major per
+    // item in pool-owned storage (extra b*T block offset), feed as input.
+    std::vector<float>& x_host = pool.alloc_f32((size_t)B * T * F);
+    for (int b = 0; b < B; ++b)
+        for (int t = 0; t < T; ++t)
+            for (int f = 0; f < F; ++f)
+                x_host[((size_t)b * T + t) * F + f] =
+                    mel[((size_t)b * n_mels + f) * T + t];
+
+    int64_t x_ne[4] = {F, T, 1, B};
     ggml_tensor* x = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 4, x_ne,
                                             x_host.data(),
                                             x_host.size() * sizeof(float));
@@ -101,6 +109,9 @@ ggml_tensor* Subsampling::build_graph(ggml_context* ctx,
                               md.data(), md.size() * sizeof(float));
         return ggml_mul(ctx, t, tm); // broadcast over ne0(W), ne2(C), ne3
     };
+    // Per-stage time masking is causal-only and single-item (B==1 asserted above),
+    // so derive the entry valid length from item 0.
+    const int in_valid_frames = valid_in.empty() ? -1 : valid_in[0];
     int valid_t0 = (in_valid_frames >= 0) ? in_valid_frames : (T - 1); // before stage 0
     int valid_t1 = (valid_t0 + 3 - 3) / 2 + 1;  // before stage 2 (after stage 0)
     int valid_t2 = (valid_t1 + 3 - 3) / 2 + 1;  // before stage 5 (after stage 2)
@@ -156,26 +167,40 @@ ggml_tensor* Subsampling::build_graph(ggml_context* ctx,
         x = ggml_relu(ctx, x);
     }
 
-    // x: ne [F'=OW, T'=OH, C, 1]. NeMo flatten:
+    // x: ne [F'=OW, T'=OH, C, B]. NeMo flatten (per item):
     //   [B,C,T',F'].transpose(1,2).reshape(B,T',C*F')
     // -> per time t, vector is channel-major: idx = c*F' + f.
     const int Fp = (int)x->ne[0]; // F'
     const int Tp = (int)x->ne[1]; // T'
-    // Want contiguous [F', C, T', 1] so flat = t*(C*F') + c*F' + f.
-    // current dims (0,1,2,3) = (F', T', C, 1); permute to (F', C, T', 1).
+    // Want contiguous [F', C, T', B] so flat[b] = t*(C*F') + c*F' + f.
+    // current dims (0,1,2,3) = (F', T', C, B); permute to (F', C, T', B).
     ggml_tensor* xp = ggml_cont(ctx, ggml_permute(ctx, x, 0, 2, 1, 3));
-    ggml_tensor* flat = ggml_reshape_2d(ctx, xp, (int64_t)C * Fp, Tp); // [C*F', T']
+    ggml_tensor* flat = ggml_reshape_3d(ctx, xp, (int64_t)C * Fp, Tp, B); // [C*F', T', B]
 
     // --- Length masking (faithful to NeMo MaskedConvSequential) ---
     // Valid output frames never read masked input frames (kernel reach stays
     // inside the valid region), so we can run the conv stack spatially and zero
-    // the flattened conv output at frames >= valid_out before the Linear.
-    const int valid_out = valid_out_len(T, in_valid_frames);
-    if (valid_out < Tp) {
-        std::vector<float>& outmask = pool.alloc_f32(Tp);
-        for (int t = 0; t < Tp; ++t) outmask[t] = (t < valid_out) ? 1.0f : 0.0f;
-        int64_t mk_ne[2] = {1, Tp};
-        ggml_tensor* mask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, mk_ne,
+    // the flattened conv output at frames >= valid_out[b] before the Linear.
+    out_valid.assign(B, 0);
+    bool any_masked = false;
+    for (int b = 0; b < B; ++b) {
+        int vi = (b < (int)valid_in.size()) ? valid_in[b] : -1;
+        int vo = valid_out_len(T, vi);
+        out_valid[b] = (vo > Tp) ? Tp : vo;
+        if (vo < Tp) any_masked = true;
+    }
+    if (any_masked) {
+        // [1, Tp, B] mask: md[b*Tp + t] = (t < valid_out[b]) ? 1 : 0; broadcasts
+        // over ne0 (the C*F' feature axis).
+        std::vector<float>& outmask = pool.alloc_f32((size_t)B * Tp);
+        for (int b = 0; b < B; ++b) {
+            int vi = (b < (int)valid_in.size()) ? valid_in[b] : -1;
+            int vo = valid_out_len(T, vi);
+            for (int t = 0; t < Tp; ++t)
+                outmask[(size_t)b * Tp + t] = (t < vo) ? 1.0f : 0.0f;
+        }
+        int64_t mk_ne[3] = {1, Tp, B};
+        ggml_tensor* mask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 3, mk_ne,
                                 outmask.data(), outmask.size() * sizeof(float));
         flat = ggml_mul(ctx, flat, mask);
     }
@@ -183,12 +208,23 @@ ggml_tensor* Subsampling::build_graph(ggml_context* ctx,
     // ---- Linear out: torch [d_model, C*F'] -> ggml ne [C*F', d_model]. ----
     ggml_tensor* ow = clone_weight(ctx, ml, "encoder.pre_encode.out.weight");
     ggml_tensor* ob = clone_weight(ctx, ml, "encoder.pre_encode.out.bias");
-    ggml_tensor* y = ggml_mul_mat(ctx, ow, flat); // [d_model, T']
-    y = ggml_add(ctx, y, ob);                     // broadcast bias [d_model] over T'
+    ggml_tensor* y = ggml_mul_mat(ctx, ow, flat); // [d_model, T', B]
+    y = ggml_add(ctx, y, ob);                     // broadcast bias [d_model] over T',B
 
     out_Tp = Tp;
-    out_valid = (valid_out > Tp) ? Tp : valid_out;
-    return y; // ne [d_model, T'] contiguous -> row-major [T', d_model].
+    return y; // ne [d_model, T', B] contiguous.
+}
+
+ggml_tensor* Subsampling::build_graph(ggml_context* ctx,
+                                      const std::vector<float>& mel,
+                                      int n_mels, int T, GraphInputPool& pool,
+                                      int& out_Tp, int& out_valid,
+                                      int in_valid_frames) const {
+    std::vector<int> vin(1, in_valid_frames), vout;
+    ggml_tensor* y = build_graph_batched(ctx, mel.data(), n_mels, T, 1, pool,
+                                         out_Tp, vout, vin);
+    out_valid = vout[0];
+    return y; // ne [d_model, T', 1] == [d_model, T']
 }
 
 void Subsampling::forward(const std::vector<float>& mel, int n_mels, int T,
