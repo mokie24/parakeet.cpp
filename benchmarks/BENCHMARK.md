@@ -447,4 +447,24 @@ The ggml engine uses markedly less peak RAM than NeMo/PyTorch, and quantization 
 - NeMo is the unchanged reference (re-running its slow CPU pass reproduces the same numbers); only the ggml engine was re-measured for this refresh.
 - Thread scaling (threads.json) shows 8 threads as the sweet spot on this 20-core host.
 
+## Batched-encoder throughput (`bench-batch`)
+
+The `bench-batch` subcommand measures the throughput of the fused batched encoder path at one or more batch sizes. It loads every clip in the manifest into memory once, then for each batch size B it groups the clips into batches of B and times the total wall-clock cost of running every batch through `transcribe_pcm_batch`. It reports proc_ms, clips/sec, and RTFx per batch size.
+
+```
+parakeet-cli bench-batch \
+  --model <model.gguf> --manifest <file> \
+  [--decoder ctc|tdt] [--threads N] [--batch-sizes 1,4,8] [--json <out>]
+```
+
+The B=1 row is the apples-to-apples baseline: it runs through the same fused batched encoder with one-clip batches, so the difference against B=4, B=8, and so on isolates the batching effect rather than any change in the encoder itself. clips/sec and RTFx are computed over all clips and the summed audio duration.
+
+On CPU, batching does not help and can cost a little: every clip in a batch is padded to the longest clip in that batch, and the CPU GEMM already saturates the threads at B=1, so the extra padded work just adds overhead. The win from batching is expected on a GPU backend, where a wider batch keeps the device busy. The numbers below are from the 110M f32 model on the LibriSpeech set (100 clips, ~901 s audio, 8 threads, CPU):
+
+| batch_size | proc_ms | clips/sec | RTFx |
+| ---: | ---: | ---: | ---: |
+| 1 | 8095.6 | 12.35 | 111.31 |
+| 4 | 10990.3 | 9.10 | 81.99 |
+| 8 | 11977.2 | 8.35 | 75.24 |
+
 

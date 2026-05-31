@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -637,6 +638,219 @@ static int cmd_bench(int argc, char** argv) {
     return 0;
 }
 
+// Measures BATCHED encoder throughput at one or more batch sizes. Mirrors
+// cmd_bench's arg parsing / model load / manifest read / warmup, but instead of
+// timing one clip at a time it groups the clips into batches of size B and times
+// the wall-clock cost of running every batch through transcribe_pcm_batch.
+//
+// The B=1 row goes through the SAME fused batched encoder path with one-clip
+// batches, so it is the apples-to-apples baseline against which the batching win
+// (B=4, B=8, ...) is read.
+static int cmd_bench_batch(int argc, char** argv) {
+    std::string model, manifest, decoder_str, json_out;
+    std::string batch_sizes_str = "1,4,8";
+    int threads = 0;  // 0 == unset -> use the components' built-in default
+    for (int i = 0; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
+            model = argv[++i];
+        } else if (std::strcmp(argv[i], "--manifest") == 0 && i + 1 < argc) {
+            manifest = argv[++i];
+        } else if (std::strcmp(argv[i], "--decoder") == 0 && i + 1 < argc) {
+            decoder_str = argv[++i];
+        } else if (std::strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+            threads = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--batch-sizes") == 0 && i + 1 < argc) {
+            batch_sizes_str = argv[++i];
+        } else if (std::strcmp(argv[i], "--json") == 0 && i + 1 < argc) {
+            json_out = argv[++i];
+        }
+    }
+    if (model.empty() || manifest.empty()) {
+        std::fprintf(stderr,
+            "usage: parakeet-cli bench-batch --model <m.gguf> --manifest <file> "
+            "[--decoder ctc|tdt] [--threads N] [--batch-sizes 1,4,8] [--json <out>]\n");
+        return 2;
+    }
+
+    // Parse --batch-sizes (comma-separated positive ints).
+    std::vector<int> batch_sizes;
+    {
+        std::stringstream ss(batch_sizes_str);
+        std::string tok;
+        while (std::getline(ss, tok, ',')) {
+            // Trim surrounding whitespace.
+            size_t b = tok.find_first_not_of(" \t");
+            if (b == std::string::npos) continue;
+            size_t e = tok.find_last_not_of(" \t");
+            int v = std::atoi(tok.substr(b, e - b + 1).c_str());
+            if (v > 0) batch_sizes.push_back(v);
+        }
+    }
+    if (batch_sizes.empty()) {
+        std::fprintf(stderr,
+            "parakeet-cli bench-batch: no valid --batch-sizes (want e.g. 1,4,8)\n");
+        return 2;
+    }
+
+    // Resolve the decoder selector (matches `transcribe` / `bench`).
+    pk::Decoder dec = pk::Decoder::kDefault;
+    if (!decoder_str.empty()) {
+        if (decoder_str == "ctc") {
+            dec = pk::Decoder::kCTC;
+        } else if (decoder_str == "tdt") {
+            dec = pk::Decoder::kTDT;
+        } else {
+            std::fprintf(stderr,
+                "parakeet-cli bench-batch: unknown --decoder '%s' (want ctc|tdt)\n",
+                decoder_str.c_str());
+            return 2;
+        }
+    }
+
+    // Apply the thread count to EVERY ggml graph computation. When --threads is
+    // omitted we report the components' built-in default.
+    int reported_threads = threads;
+    if (threads > 0) {
+        pk::set_num_threads(threads);
+    } else {
+        reported_threads = 8;  // the persistent-backend default (kDefaultThreads)
+    }
+
+    bool man_ok = false;
+    std::vector<std::string> paths = read_manifest(manifest, man_ok);
+    if (!man_ok) {
+        std::fprintf(stderr, "parakeet-cli bench-batch: failed to read manifest %s\n",
+                     manifest.c_str());
+        return 1;
+    }
+    if (paths.empty()) {
+        std::fprintf(stderr, "parakeet-cli bench-batch: manifest %s has no audio paths\n",
+                     manifest.c_str());
+        return 1;
+    }
+
+    using clock = std::chrono::steady_clock;
+    auto ms_since = [](clock::time_point t0) {
+        return std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+    };
+
+    // Load ALL clips into memory ONCE (untimed) so the per-batch loop only times
+    // the encoder/decoder work, not audio decode/IO.
+    std::vector<std::vector<float>> clips;
+    clips.reserve(paths.size());
+    double total_audio_sec = 0.0;
+    for (const std::string& p : paths) {
+        pk::Audio audio;
+        if (!pk::load_audio_16k_mono(p, audio)) {
+            std::fprintf(stderr, "parakeet-cli bench-batch: failed to load audio %s\n",
+                         p.c_str());
+            return 1;
+        }
+        total_audio_sec += (double)audio.samples.size() / 16000.0;
+        clips.push_back(std::move(audio.samples));
+    }
+
+    // Load the model ONCE -- timed, and excluded from per-batch proc_ms.
+    auto t_load = clock::now();
+    std::unique_ptr<pk::Model> m = pk::Model::load(model);
+    double load_ms = ms_since(t_load);
+    if (!m) {
+        std::fprintf(stderr, "parakeet-cli bench-batch: failed to load model %s\n",
+                     model.c_str());
+        return 1;
+    }
+
+    // Warm up once (untimed): pays the one-time lazy weight upload / kernel init
+    // so per-batch timings are steady-state.
+    {
+        std::vector<std::vector<float>> warm{clips[0]};
+        try {
+            (void)m->transcribe_pcm_batch(warm, 16000, dec);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "parakeet-cli bench-batch: warmup failed: %s\n", e.what());
+            return 1;
+        }
+    }
+
+    struct BatchResult { int batch_size; double proc_ms; size_t n_clips;
+                         double clips_per_sec; double rtfx; };
+    std::vector<BatchResult> results;
+    results.reserve(batch_sizes.size());
+
+    for (int B : batch_sizes) {
+        auto t_proc = clock::now();
+        for (size_t s = 0; s < clips.size(); s += (size_t)B) {
+            size_t end = std::min(clips.size(), s + (size_t)B);
+            std::vector<std::vector<float>> chunk(clips.begin() + (long)s,
+                                                  clips.begin() + (long)end);
+            try {
+                (void)m->transcribe_pcm_batch(chunk, 16000, dec);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr,
+                    "parakeet-cli bench-batch: transcribe failed at batch_size=%d: %s\n",
+                    B, e.what());
+                return 1;
+            }
+        }
+        double proc_ms = ms_since(t_proc);
+        double secs = proc_ms / 1000.0;
+        double clips_per_sec = secs > 0.0 ? (double)clips.size() / secs : 0.0;
+        double rtfx = secs > 0.0 ? total_audio_sec / secs : 0.0;
+        results.push_back({B, proc_ms, clips.size(), clips_per_sec, rtfx});
+    }
+
+    // Human-readable summary table to stderr.
+    std::fprintf(stderr,
+        "\nbench-batch: %zu clips, %.2f s audio, decoder=%s, threads=%d, load_ms=%.1f\n",
+        clips.size(), total_audio_sec,
+        decoder_str.empty() ? "default" : decoder_str.c_str(),
+        reported_threads, load_ms);
+    std::fprintf(stderr, "  %-12s %-14s %-14s %-10s\n",
+                 "batch_size", "proc_ms", "clips/sec", "RTFx");
+    for (const BatchResult& r : results) {
+        std::fprintf(stderr, "  %-12d %-14.1f %-14.2f %-10.2f\n",
+                     r.batch_size, r.proc_ms, r.clips_per_sec, r.rtfx);
+    }
+
+    // Hand-roll the JSON document.
+    std::string out;
+    out.reserve(256 + results.size() * 96);
+    out += "{\"model\":";
+    bench_json_string(out, model);
+    out += ",\"decoder\":";
+    bench_json_string(out, decoder_str.empty() ? std::string("default") : decoder_str);
+    char numbuf[96];
+    std::snprintf(numbuf, sizeof(numbuf), ",\"threads\":%d", reported_threads);
+    out += numbuf;
+    std::snprintf(numbuf, sizeof(numbuf), ",\"n_clips\":%zu", clips.size());
+    out += numbuf;
+    std::snprintf(numbuf, sizeof(numbuf), ",\"total_audio_sec\":%.6f", total_audio_sec);
+    out += numbuf;
+    out += ",\"results\":[";
+    for (size_t i = 0; i < results.size(); ++i) {
+        if (i) out += ',';
+        std::snprintf(numbuf, sizeof(numbuf),
+            "{\"batch_size\":%d,\"proc_ms\":%.3f,\"clips_per_sec\":%.6f,\"rtfx\":%.6f}",
+            results[i].batch_size, results[i].proc_ms,
+            results[i].clips_per_sec, results[i].rtfx);
+        out += numbuf;
+    }
+    out += "]}";
+
+    if (!json_out.empty()) {
+        std::ofstream of(json_out, std::ios::binary | std::ios::trunc);
+        if (!of) {
+            std::fprintf(stderr, "parakeet-cli bench-batch: failed to write %s\n",
+                         json_out.c_str());
+            return 1;
+        }
+        of << out << '\n';
+    } else {
+        std::printf("%s\n", out.c_str());
+    }
+    return 0;
+}
+
 // Run a subcommand, then free the process-global backend while the GPU driver is
 // still alive (the subcommand's local Model is already destroyed by the time it
 // returns, releasing its device weight buffer). Avoids the CUDA "driver shutting
@@ -654,6 +868,8 @@ int main(int argc, char** argv) {
         return run_and_shutdown(cmd_transcribe, argc - 2, argv + 2);
     if (argc >= 2 && std::strcmp(argv[1], "quantize") == 0)
         return run_and_shutdown(cmd_quantize, argc - 2, argv + 2);
+    if (argc >= 2 && std::strcmp(argv[1], "bench-batch") == 0)
+        return run_and_shutdown(cmd_bench_batch, argc - 2, argv + 2);
     if (argc >= 2 && std::strcmp(argv[1], "bench") == 0)
         return run_and_shutdown(cmd_bench, argc - 2, argv + 2);
     std::fprintf(stderr,
@@ -664,6 +880,8 @@ int main(int argc, char** argv) {
         "  parakeet-cli quantize <in.gguf> <out.gguf> "
         "<q4_0|q5_0|q8_0|q4_k|q5_k|q6_k>\n"
         "  parakeet-cli bench --model <model.gguf> --manifest <file> "
-        "[--decoder ctc|tdt] [--threads N] [--json <out>]\n");
+        "[--decoder ctc|tdt] [--threads N] [--json <out>]\n"
+        "  parakeet-cli bench-batch --model <model.gguf> --manifest <file> "
+        "[--decoder ctc|tdt] [--threads N] [--batch-sizes 1,4,8] [--json <out>]\n");
     return 2;
 }
