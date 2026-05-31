@@ -32,11 +32,12 @@ public:
     void forward(const std::vector<float>& mel, int n_mels, int T,
                  std::vector<float>& enc_out, int& d_model, int& Tout) const;
 
-    // Batched encoder. Returns per-item encoder outputs, each row-major
-    // [d_model, Tout_b] (channels-first) — identical orientation to forward().
-    // `d_model` and `Tout` (the padded T') are filled; `valid_Tout` holds each
-    // item's non-pad output-frame count (size B). For B=1 this is exactly
-    // forward(). Until Phase 5 lands the batched graph, B>1 loops internally.
+    // Batched encoder. Runs all B clips through ONE fused ggml graph
+    // (subsampling -> conformer stack -> output). Returns per-item encoder
+    // outputs, each row-major [d_model, Tout_b] (channels-first), the same
+    // orientation as forward(). `d_model` and `Tout` (the padded T') are filled;
+    // `valid_Tout` holds each item's non-pad output-frame count (size B). For
+    // B=1 this reduces to forward().
     void forward_batch(const MelBatch& mels,
                        std::vector<std::vector<float>>& enc_outs,
                        int& d_model, int& Tout,
