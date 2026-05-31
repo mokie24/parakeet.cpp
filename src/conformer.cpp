@@ -27,13 +27,18 @@ static ggml_tensor* clone_weight_opt(ggml_context* ctx, const ModelLoader& ml,
 }
 
 // Build the ConformerConvolution sub-graph (everything AFTER norm_conv) on the
-// conv input `c` (= norm_conv(residual)), ne [D, T] (channels fastest). Returns
-// the conv output tensor, ne [D, T] (row-major [T, D]). See header for the NeMo
-// `ConformerConvolution.forward` mapping. `pool` keeps host-side mask/scale/
-// shift buffers alive until the enclosing Backend::compute finishes.
+// conv input `c` (= norm_conv(residual)), ne [D, T, B] (channels fastest, batch
+// on ne2). Returns the conv output tensor, ne [D, T, B]. See header for the NeMo
+// `ConformerConvolution.forward` mapping. `valid_len[b]` is the per-item valid
+// time length; the pre-depthwise pad mask is built per item so trailing-pad
+// frames cannot leak through the time-mixing depthwise conv. All other ops are
+// per-frame (1x1 convs == matmul, GLU, norm, silu) and broadcast over ne2.
+// `pool` keeps host-side mask/scale/shift buffers alive until the enclosing
+// Backend::compute finishes.
 static ggml_tensor* build_conv_module(ggml_context* ctx, const ModelLoader& ml,
                                       const std::string& pre, ggml_tensor* c,
-                                      int D, int T, int K, int valid_len,
+                                      int D, int T, int K, int B,
+                                      const std::vector<int>& valid_len,
                                       const std::string& conv_norm_type,
                                       bool conv_causal, GraphInputPool& pool) {
     const float ln_eps = 1e-5f;
@@ -44,36 +49,48 @@ static ggml_tensor* build_conv_module(ggml_context* ctx, const ModelLoader& ml,
     ggml_tensor* pw1w = clone_weight(ctx, ml, pre + "conv.pointwise_conv1.weight");
     pw1w = ggml_reshape_2d(ctx, pw1w, D, 2 * D); // [in=d, out=2d]
     ggml_tensor* pw1b = clone_weight_opt(ctx, ml, pre + "conv.pointwise_conv1.bias");
-    ggml_tensor* y = ggml_mul_mat(ctx, pw1w, c); // [2d, T]
+    ggml_tensor* y = ggml_mul_mat(ctx, pw1w, c); // [2d, T, B]
     if (pw1b) y = ggml_add(ctx, y, pw1b);
 
-    // -- GLU over channel dim (NeMo F.glu(x, dim=1)).
-    ggml_tensor* a = ggml_view_2d(ctx, y, D, T, y->nb[1], 0);
-    ggml_tensor* b = ggml_view_2d(ctx, y, D, T, y->nb[1], (size_t)D * y->nb[0]);
+    // -- GLU over channel dim (NeMo F.glu(x, dim=1)). y is [2D, T, B]; each half
+    // is D wide along ne0, stepping T via nb[1] and B via nb[2].
+    ggml_tensor* a = ggml_view_3d(ctx, y, D, T, B, y->nb[1], y->nb[2], 0);
+    ggml_tensor* b = ggml_view_3d(ctx, y, D, T, B, y->nb[1], y->nb[2],
+                                  (size_t)D * y->nb[0]);
     ggml_tensor* glu = ggml_mul(ctx, ggml_cont(ctx, a),
-                                ggml_sigmoid(ctx, ggml_cont(ctx, b))); // [d, T]
+                                ggml_sigmoid(ctx, ggml_cont(ctx, b))); // [d, T, B]
 
-    // -- pad_mask: zero padded time positions before depthwise conv.
-    if (valid_len < T) {
-        std::vector<float>& md = pool.alloc_f32(T);
-        for (int t = 0; t < T; ++t) md[t] = (t < valid_len) ? 1.0f : 0.0f;
-        int64_t tm_ne[2] = {1, T};
-        ggml_tensor* tmask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, tm_ne,
+    // -- pad_mask: zero padded time positions before depthwise conv, per item.
+    // The depthwise conv is the only time-mixing op here; without this mask the
+    // trailing-pad region (no longer zero after pointwise bias/GLU) would leak
+    // into the last valid output frame of a batched item. Mask is [1, T, B] and
+    // broadcasts over ne0 (D). Emit only if some item has valid_len < T.
+    bool need_mask = false;
+    for (int bi = 0; bi < B; ++bi) if (valid_len[bi] < T) { need_mask = true; break; }
+    if (need_mask) {
+        std::vector<float>& md = pool.alloc_f32((size_t)T * B);
+        for (int bi = 0; bi < B; ++bi)
+            for (int t = 0; t < T; ++t)
+                md[(size_t)bi * T + t] = (t < valid_len[bi]) ? 1.0f : 0.0f;
+        int64_t tm_ne[3] = {1, T, B};
+        ggml_tensor* tmask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 3, tm_ne,
                                  md.data(), md.size() * sizeof(float));
         glu = ggml_mul(ctx, glu, tmask);
     }
 
     // -- depthwise_conv (Conv1d d->d, k=K, groups=d). F32 im2col throughout.
-    ggml_tensor* glu_tc = ggml_cont(ctx, ggml_transpose(ctx, glu)); // [T, C]
+    // Transpose ne0<->ne1 (keep batch on ne2): [D,T,B] -> [T,C,B].
+    ggml_tensor* glu_tcb = ggml_cont(ctx, ggml_permute(ctx, glu, 1, 0, 2, 3)); // [T, C, B]
     ggml_tensor* dww = clone_weight(ctx, ml, pre + "conv.depthwise_conv.weight"); // [K,1,C]
     ggml_tensor* dw;
     {
-        ggml_tensor* nb = ggml_reshape_4d(ctx, glu_tc,
-                              glu_tc->ne[0], 1, glu_tc->ne[1], 1); // [T,1,C,1]
+        // im2col layout: [W=T, H=1, C, N=B].
+        ggml_tensor* nb = ggml_reshape_4d(ctx, glu_tcb,
+                              glu_tcb->ne[0], 1, glu_tcb->ne[1], B); // [T,1,C,B]
         ggml_tensor* ic;
         if (conv_causal) {
             ggml_tensor* nbp = ggml_pad_ext(ctx, nb, /*lp0*/K - 1, /*rp0*/0,
-                                            0, 0, 0, 0, 0, 0); // [T+K-1,1,C,1]
+                                            0, 0, 0, 0, 0, 0); // [T+K-1,1,C,B]
             ic = ggml_im2col(ctx, dww, nbp, /*s0*/1, /*s1*/0,
                              /*p0*/0, /*p1*/0, /*d0*/1, /*d1*/0,
                              /*is_2D*/false, GGML_TYPE_F32);
@@ -82,13 +99,14 @@ static ggml_tensor* build_conv_module(ggml_context* ctx, const ModelLoader& ml,
                              /*p0*/pad, /*p1*/0, /*d0*/1, /*d1*/0,
                              /*is_2D*/false, GGML_TYPE_F32);
         }
+        // mul_mat result r2 ne = [OW=T, 1, C, B]; drop the unit ne1 -> [T, C, B].
         ggml_tensor* r2 = ggml_mul_mat(ctx, ic, dww);
-        dw = ggml_reshape_3d(ctx, r2, r2->ne[0], r2->ne[2], 1); // [OW=T, C, 1]
+        dw = ggml_reshape_3d(ctx, r2, r2->ne[0], r2->ne[2], B); // [OW=T, C, B]
     }
-    dw = ggml_reshape_2d(ctx, dw, T, D);                  // [T, C]
     ggml_tensor* dwb = clone_weight_opt(ctx, ml, pre + "conv.depthwise_conv.bias"); // [C]
-    ggml_tensor* dwt = ggml_cont(ctx, ggml_transpose(ctx, dw)); // [C, T]
-    if (dwb) dwt = ggml_add(ctx, dwt, dwb);               // broadcast [C] over T
+    // transpose ne0<->ne1 (keep batch on ne2): [T,C,B] -> [C,T,B].
+    ggml_tensor* dwt = ggml_cont(ctx, ggml_permute(ctx, dw, 1, 0, 2, 3)); // [C, T, B]
+    if (dwb) dwt = ggml_add(ctx, dwt, dwb);               // broadcast [C] over T,B
 
     // -- norm (between depthwise conv and SiLU).
     ggml_tensor* normed;
@@ -96,7 +114,7 @@ static ggml_tensor* build_conv_module(ggml_context* ctx, const ModelLoader& ml,
         ggml_tensor* g = clone_weight(ctx, ml, pre + "conv.batch_norm.weight"); // [C]
         ggml_tensor* bb = clone_weight(ctx, ml, pre + "conv.batch_norm.bias");  // [C]
         normed = ggml_norm(ctx, dwt, ln_eps);             // normalize over ne0=C
-        normed = ggml_mul(ctx, normed, g);                // *gamma  (broadcast [C] over T)
+        normed = ggml_mul(ctx, normed, g);                // *gamma  (broadcast [C] over T,B)
         normed = ggml_add(ctx, normed, bb);               // +beta
     } else {
         // batch_norm (inference): fold into per-channel scale/shift constants:
@@ -117,7 +135,7 @@ static ggml_tensor* build_conv_module(ggml_context* ctx, const ModelLoader& ml,
                                  sc.data(), sc.size() * sizeof(float));
         ggml_tensor* shift = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 1, d_ne,
                                  sh.data(), sh.size() * sizeof(float));
-        normed = ggml_add(ctx, ggml_mul(ctx, dwt, scale), shift); // [C, T]
+        normed = ggml_add(ctx, ggml_mul(ctx, dwt, scale), shift); // [C, T, B]
     }
 
     // -- SiLU (Swish), then pointwise_conv2 (Conv1d d->d, k=1).
@@ -125,9 +143,9 @@ static ggml_tensor* build_conv_module(ggml_context* ctx, const ModelLoader& ml,
     ggml_tensor* pw2w = clone_weight(ctx, ml, pre + "conv.pointwise_conv2.weight");
     pw2w = ggml_reshape_2d(ctx, pw2w, D, D); // [in=d, out=d]
     ggml_tensor* pw2b = clone_weight_opt(ctx, ml, pre + "conv.pointwise_conv2.bias");
-    ggml_tensor* cout = ggml_mul_mat(ctx, pw2w, normed); // [d, T]
+    ggml_tensor* cout = ggml_mul_mat(ctx, pw2w, normed); // [d, T, B]
     if (pw2b) cout = ggml_add(ctx, cout, pw2b);
-    return cout; // [D, T] -> row-major [T, D]; this is layers[i].conv output
+    return cout; // [D, T, B]; this is layers[i].conv output
 }
 
 ConformerLayer::ConformerLayer(const ModelLoader& ml, int layer_idx)
@@ -198,7 +216,8 @@ ggml_tensor* ConformerLayer::build_graph(ggml_context* ctx, ggml_tensor* xt,
 
     // === Stage C: r = r + conv(norm_conv(r)). ===
     ggml_tensor* c = layer_norm(r, "norm_conv"); // [D, T]
-    ggml_tensor* conv_out = build_conv_module(ctx, ml, pre, c, D, T, K, valid_len,
+    ggml_tensor* conv_out = build_conv_module(ctx, ml, pre, c, D, T, K, /*B*/1,
+                                              std::vector<int>{valid_len},
                                               conv_norm_type_, conv_causal_, pool);
     r = ggml_add(ctx, r, conv_out);
 
@@ -296,8 +315,8 @@ void ConformerLayer::forward_with_conv(const std::vector<float>& x, int T,
                 r = ggml_add(ctx, r, attn_out);
                 ggml_tensor* c = layer_norm(r, "norm_conv");
                 return build_conv_module(ctx, ml_, pre, c, D, T, conv_kernel_,
-                                         valid_len, conv_norm_type_, conv_causal_,
-                                         pool);
+                                         /*B*/1, std::vector<int>{valid_len},
+                                         conv_norm_type_, conv_causal_, pool);
             }, conv_out);
         assert(ok && "conformer conv localization graph failed"); (void)ok;
     }
@@ -322,7 +341,8 @@ void ConformerLayer::conv_module_forward(const std::vector<float>& conv_in, int 
             int64_t c_ne[2] = {D, T};
             ggml_tensor* c = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, c_ne,
                                  conv_in.data(), (size_t)T * D * sizeof(float));
-            return build_conv_module(ctx, ml, pre, c, D, T, K, valid_len,
+            return build_conv_module(ctx, ml, pre, c, D, T, K, /*B*/1,
+                                     std::vector<int>{valid_len},
                                      conv_norm_type_, conv_causal_, pool);
         }, out);
     assert(ok && "conv_module_forward graph failed"); (void)ok;
