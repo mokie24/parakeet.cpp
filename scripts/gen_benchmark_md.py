@@ -215,6 +215,82 @@ def build_diverse_section(models: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# ── Batched decode throughput ──────────────────────────────
+
+def _decode_batch_subtable(json_dir: Path, kind: str) -> str:
+    """Render one machine sub-table from decode-batch JSON files in `json_dir`.
+
+    `kind` is "CPU" or "GPU" (for the caption). Returns "" when the directory is
+    absent or holds no JSON files.
+    """
+    if not json_dir.is_dir():
+        return ""
+    files = sorted(json_dir.glob("*.json"))
+    if not files:
+        return ""
+
+    docs = []
+    for fp in files:
+        with open(fp) as f:
+            d = json.load(f)
+        d["_label"] = fp.stem
+        docs.append(d)
+    docs.sort(key=lambda d: d["_label"])
+
+    # One-line caption from the first doc's metadata.
+    meta = docs[0]
+    threads = meta.get("threads", "?")
+    backend = meta.get("backend", "?")
+    reps = meta.get("reps", "?")
+    caption = (
+        f"**{kind}** ({threads} threads, backend={backend}, dtype from filename), "
+        f"best-of-{reps}, one clip replicated B times."
+    )
+
+    # Column set: the B values to show (fixed display order, only those present).
+    show_bs = [1, 4, 8, 16]
+    header = "| Model | " + " | ".join(f"B={b}" for b in show_bs) + " | clips/s @B=16 |"
+    sep = "|" + "---|" * (len(show_bs) + 2)
+
+    lines = [caption + "\n", "", header, sep]
+    for d in docs:
+        by_b = {int(r["B"]): r for r in d.get("rows", [])}
+        cells = []
+        for b in show_bs:
+            r = by_b.get(b)
+            cells.append(f"{r['speedup']:.2f}\u00d7" if r else "\u2014")
+        r16 = by_b.get(16)
+        cps16 = f"{r16['batched_cps']:.1f}" if r16 else "\u2014"
+        lines.append(f"| {d['_label']} | " + " | ".join(cells) + f" | {cps16} |")
+    return "\n".join(lines) + "\n"
+
+
+def build_batched_decode_section(results_dir: Path) -> str:
+    """Decode-batching speedup tables (CPU + GPU). Empty string when no data."""
+    cpu = _decode_batch_subtable(results_dir / "decode_batch" / "cpu", "CPU")
+    gpu = _decode_batch_subtable(results_dir / "decode_batch" / "gpu", "GPU")
+    if not cpu and not gpu:
+        return ""
+
+    intro = (
+        "## Batched decode throughput\n\n"
+        "Decode batching coalesces the per-step prediction-LSTM and joint-network "
+        "GEMMs across several utterances into single batched ops, so one decode "
+        "loop advances B clips at once. It applies to **transducer (TDT/RNN-T) "
+        "models only** \u2014 CTC has no autoregressive decode to batch. Speedup is "
+        "`serial_ms / batched_ms`: the wall-clock of B independent single-clip "
+        "decodes divided by one batched decode over the same B copies (encoder "
+        "cost is paid once and excluded). The `clips/s @B=16` column is the "
+        "batched decode throughput at B=16.\n"
+    )
+    parts = [intro]
+    if cpu:
+        parts.append("\n" + cpu)
+    if gpu:
+        parts.append("\n" + gpu)
+    return "".join(parts)
+
+
 # ── Findings ─────────────────────────────────────────────────────────────────────
 
 def build_findings(models: list[dict], dtypes: list[str]) -> str:
@@ -341,6 +417,7 @@ def main():
         build_methodology(models, dtypes) + "\n",
         build_headline_table(models) + "\n",
         build_quant_table(models, dtypes) + "\n",
+        build_batched_decode_section(results_dir) + "\n",
         build_plots_section(plots_dir, out_path) + "\n",
         build_diverse_section(models) + "\n",
         build_findings(models, dtypes) + "\n",

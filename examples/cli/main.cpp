@@ -873,7 +873,7 @@ static int cmd_bench_batch(int argc, char** argv) {
 // deterministic) as a correctness sanity check.
 // ---------------------------------------------------------------------------
 static int cmd_bench_decode(int argc, char** argv) {
-    std::string model, audio;
+    std::string model, audio, json_out;
     std::string batch_sizes_str = "1,4,8,16";
     int threads = 0;  // 0 == unset -> use the persistent-backend default
     int reps = 5;
@@ -888,12 +888,14 @@ static int cmd_bench_decode(int argc, char** argv) {
             threads = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--reps") == 0 && i + 1 < argc) {
             reps = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--json") == 0 && i + 1 < argc) {
+            json_out = argv[++i];
         }
     }
     if (model.empty() || audio.empty()) {
         std::fprintf(stderr,
             "usage: parakeet-cli bench-decode --model <m.gguf> --audio <wav> "
-            "[--batch-sizes 1,4,8,16] [--threads N] [--reps R]\n");
+            "[--batch-sizes 1,4,8,16] [--threads N] [--reps R] [--json <out>]\n");
         return 2;
     }
     if (reps < 1) reps = 1;
@@ -1049,6 +1051,67 @@ static int cmd_bench_decode(int argc, char** argv) {
     }
     std::fprintf(stderr, "  sanity (batched ids[0]==serial): %s\n",
                  sanity_ok ? "OK" : "MISMATCH (see WARN above)");
+
+    // Optional machine-readable JSON document (hand-rolled, same style as
+    // cmd_bench). Written ONLY when --json <out> is given; the human table above
+    // always prints regardless.
+    if (!json_out.empty()) {
+        // basename of the model gguf path.
+        std::string model_base = model;
+        size_t slash = model_base.find_last_of("/\\");
+        if (slash != std::string::npos) model_base = model_base.substr(slash + 1);
+
+        std::string out;
+        out.reserve(512 + rows.size() * 96);
+        out += "{\"model\":";
+        bench_json_string(out, model_base);
+        out += ",\"decoder\":";
+        bench_json_string(out, use_tdt ? std::string("tdt") : std::string("ctc"));
+        out += ",\"backend\":";
+        bench_json_string(out, std::string(pk::global_backend().device_name()));
+        char nb[64];
+        std::snprintf(nb, sizeof(nb), ",\"threads\":%d", reported_threads);
+        out += nb;
+        std::snprintf(nb, sizeof(nb), ",\"reps\":%d", reps);
+        out += nb;
+        std::snprintf(nb, sizeof(nb), ",\"clip_frames\":%d", Tout);
+        out += nb;
+        std::snprintf(nb, sizeof(nb), ",\"d_model\":%d", dm);
+        out += nb;
+        out += ",\"batch_sizes\":[";
+        for (size_t i = 0; i < batch_sizes.size(); ++i) {
+            if (i) out += ',';
+            std::snprintf(nb, sizeof(nb), "%d", batch_sizes[i]);
+            out += nb;
+        }
+        out += "],\"rows\":[";
+        for (size_t i = 0; i < rows.size(); ++i) {
+            if (i) out += ',';
+            const Row& r = rows[i];
+            std::snprintf(nb, sizeof(nb), "{\"B\":%d", r.B);
+            out += nb;
+            std::snprintf(nb, sizeof(nb), ",\"serial_ms\":%.2f", r.serial_ms);
+            out += nb;
+            std::snprintf(nb, sizeof(nb), ",\"batched_ms\":%.2f", r.batched_ms);
+            out += nb;
+            std::snprintf(nb, sizeof(nb), ",\"speedup\":%.2f", r.speedup);
+            out += nb;
+            std::snprintf(nb, sizeof(nb), ",\"serial_cps\":%.1f", r.serial_cps);
+            out += nb;
+            std::snprintf(nb, sizeof(nb), ",\"batched_cps\":%.1f", r.batched_cps);
+            out += nb;
+            out += '}';
+        }
+        out += "]}";
+
+        std::ofstream of(json_out, std::ios::binary | std::ios::trunc);
+        if (!of) {
+            std::fprintf(stderr, "parakeet-cli bench-decode: failed to write %s\n",
+                         json_out.c_str());
+            return 1;
+        }
+        of << out << '\n';
+    }
     return 0;
 }
 
@@ -1087,6 +1150,6 @@ int main(int argc, char** argv) {
         "  parakeet-cli bench-batch --model <model.gguf> --manifest <file> "
         "[--decoder ctc|tdt] [--threads N] [--batch-sizes 1,4,8] [--json <out>]\n"
         "  parakeet-cli bench-decode --model <model.gguf> --audio <wav> "
-        "[--batch-sizes 1,4,8,16] [--threads N] [--reps R]\n");
+        "[--batch-sizes 1,4,8,16] [--threads N] [--reps R] [--json <out>]\n");
     return 2;
 }
