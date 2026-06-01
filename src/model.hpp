@@ -35,6 +35,13 @@ public:
     std::string transcribe_path(const std::string& wav_path,
                                 Decoder decoder = Decoder::kDefault) const;
 
+    // Transcribe a batch of mono float PCM clips. Each is resampled to 16 kHz if
+    // needed, then all run through the batched encoder; decode is per item.
+    // Returns one transcript per input, in order.
+    std::vector<std::string> transcribe_pcm_batch(
+        const std::vector<std::vector<float>>& pcms, int sample_rate,
+        Decoder decoder = Decoder::kDefault) const;
+
     // Transcribe raw mono float PCM, returning the flat text plus per-word and
     // per-token timestamps + confidence (matching NeMo timestamps=True +
     // 'max_prob' confidence). If `sample_rate != 16000` the audio is linearly
@@ -46,6 +53,13 @@ public:
     // Convenience: transcribe a WAV file with timestamps + confidence.
     Transcription transcribe_path_with_timestamps(
         const std::string& wav_path,
+        Decoder decoder = Decoder::kDefault) const;
+
+    // Batched timestamped transcription. Each clip is resampled to 16 kHz if
+    // needed, all run through the batched encoder; decode + timestamp extraction
+    // are per item. Returns one Transcription per input, in order.
+    std::vector<Transcription> transcribe_pcm_batch_with_timestamps(
+        const std::vector<std::vector<float>>& pcms, int sample_rate,
         Decoder decoder = Decoder::kDefault) const;
 
     const ParakeetConfig& config() const { return loader_.config(); }
@@ -66,6 +80,15 @@ private:
     // loads the WAV first).
     std::string transcribe_16k(const std::vector<float>& pcm16k,
                                Decoder decoder) const;
+
+    // Core batched orchestration: N 16 kHz clips -> N transcripts. Stacks mels,
+    // runs forward_batch, decodes each item with the existing greedy decoders.
+    std::vector<std::string> transcribe_16k_batch(
+        const std::vector<std::vector<float>>& pcms16k, Decoder decoder) const;
+
+    // Core batched timestamped orchestration: N 16 kHz clips -> N Transcriptions.
+    std::vector<Transcription> transcribe_16k_batch_with_timestamps(
+        const std::vector<std::vector<float>>& pcms16k, Decoder decoder) const;
 
     // Core orchestration for the timestamps path: 16 kHz mono PCM -> full
     // Transcription (text + per-token TokenInfo + grouped words). Shared by the

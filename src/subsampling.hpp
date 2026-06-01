@@ -27,6 +27,15 @@ public:
                              int n_mels, int T, GraphInputPool& pool,
                              int& out_Tp, int& out_valid,
                              int in_valid_frames = -1) const;
+    // Batched GRAPH-BUILDER. `mel` is contiguous [B][n_mels][T] (mel[(b*n_mels+m)*T+t]),
+    // `valid_in` holds per-item valid mel frame counts (size B; element <0 means use
+    // the offline T-1 convention for that item). Returns [d_model, T', B]
+    // (ne0=d_model, ne1=T', ne2=B). `out_valid` (size B) receives each item's
+    // non-pad output-frame count.
+    ggml_tensor* build_graph_batched(ggml_context* ctx, const float* mel,
+                                     int n_mels, int T, int B, GraphInputPool& pool,
+                                     int& out_Tp, std::vector<int>& out_valid,
+                                     const std::vector<int>& valid_in) const;
     // mel: row-major [n_mels, T] (feat-major inner = T) — i.e. mel[m*T + t].
     // out: row-major [Tout, d_model] (time-major) matching baseline subsampling_out.
     void forward(const std::vector<float>& mel, int n_mels, int T,

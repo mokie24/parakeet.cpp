@@ -1,0 +1,50 @@
+{
+  "model": "rnnt-1.1b",
+  "decoder": "rnnt",
+  "backend": "CUDA0",
+  "dtype": "f16",
+  "threads": 8,
+  "reps": 5,
+  "clip_frames": 131,
+  "d_model": 1024,
+  "batch_sizes": [
+    1,
+    4,
+    8,
+    16
+  ],
+  "rows": [
+    {
+      "B": 1,
+      "serial_ms": 18.73,
+      "batched_ms": 18.73,
+      "speedup": 1.0,
+      "serial_cps": 53.4,
+      "batched_cps": 53.4
+    },
+    {
+      "B": 4,
+      "serial_ms": 74.74,
+      "batched_ms": 22.55,
+      "speedup": 3.31,
+      "serial_cps": 53.5,
+      "batched_cps": 177.4
+    },
+    {
+      "B": 8,
+      "serial_ms": 150.25,
+      "batched_ms": 23.83,
+      "speedup": 6.3,
+      "serial_cps": 53.2,
+      "batched_cps": 335.7
+    },
+    {
+      "B": 16,
+      "serial_ms": 300.95,
+      "batched_ms": 26.93,
+      "speedup": 11.17,
+      "serial_cps": 53.2,
+      "batched_cps": 594.1
+    }
+  ]
+}

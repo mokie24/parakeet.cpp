@@ -84,6 +84,38 @@ Averaged over all models (LibriSpeech). Size is the mean GGUF size as a fraction
 
 > f32 is the faithful reference (agreement ≈ 0). q8_0 is near-lossless; K-quants (q6_k→q4_k) shrink the model further at a small, monotonic accuracy cost. See the per-model quant plots below.
 
+## Batched decode throughput
+
+Decode batching coalesces the per-step prediction-LSTM and joint-network GEMMs across several utterances into single batched ops, so one decode loop advances B clips at once. It applies to **transducer (TDT/RNN-T) models only** — CTC has no autoregressive decode to batch. Speedup is `serial_ms / batched_ms`: the wall-clock of B independent single-clip decodes divided by one batched decode over the same B copies (encoder cost is paid once and excluded). The `clips/s @B=16` column is the batched decode throughput at B=16.
+
+**CPU** (cpu, q5_k, 8 threads), best-of-5, one clip replicated B times.
+
+
+| Model | B=1 | B=4 | B=8 | B=16 | clips/s @B=16 |
+|---|---|---|---|---|---|
+| rnnt-0.6b | 0.98× | 2.81× | 3.91× | 5.01× | 378.9 |
+| rnnt-1.1b | 1.01× | 2.27× | 3.54× | 4.19× | 366.1 |
+| rt-eou-120m-v1 | 1.00× | 2.32× | 3.00× | 3.36× | 638.1 |
+| tdt-0.6b-v2 | 0.90× | 2.78× | 4.12× | 5.19× | 458.8 |
+| tdt-0.6b-v3 | 0.82× | 3.26× | 5.90× | 4.88× | 253.2 |
+| tdt-1.1b | 0.98× | 2.55× | 3.74× | 4.57× | 483.2 |
+| tdt_ctc-1.1b | 1.00× | 2.59× | 3.80× | 4.73× | 458.8 |
+| tdt_ctc-110m | 1.03× | 2.46× | 3.12× | 3.61× | 834.5 |
+
+**GPU** (CUDA0, f16, 8 threads), best-of-5, one clip replicated B times.
+
+
+| Model | B=1 | B=4 | B=8 | B=16 | clips/s @B=16 |
+|---|---|---|---|---|---|
+| rnnt-0.6b | 1.00× | 3.32× | 6.46× | 11.44× | 585.8 |
+| rnnt-1.1b | 1.00× | 3.31× | 6.30× | 11.17× | 594.1 |
+| rt-eou-120m-v1 | 0.98× | 3.11× | 5.87× | 10.25× | 951.1 |
+| tdt-0.6b-v2 | 1.00× | 3.61× | 6.88× | 12.42× | 712.0 |
+| tdt-0.6b-v3 | 1.00× | 3.45× | 6.49× | 11.45× | 614.5 |
+| tdt-1.1b | 1.00× | 3.55× | 6.72× | 12.17× | 817.9 |
+| tdt_ctc-1.1b | 1.00× | 3.45× | 6.50× | 11.47× | 746.9 |
+| tdt_ctc-110m | 1.01× | 3.29× | 6.33× | 10.89× | 1259.7 |
+
 ## Plots
 
 ### RTFx per model — NeMo vs ours (all dtypes), LibriSpeech

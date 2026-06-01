@@ -94,4 +94,76 @@ void Encoder::forward_capture(const std::vector<float>& mel, int n_mels, int T,
     Tout = Tp;
 }
 
+void Encoder::forward_batch(const MelBatch& mels,
+                            std::vector<std::vector<float>>& enc_outs,
+                            int& d_model, int& Tout,
+                            std::vector<int>& valid_Tout) const {
+    // Phase 5: the WHOLE batched encoder is ONE fused ggml graph, mirroring
+    // forward_capture but at B>1: subsampling -> xscaling -> pos_emb -> N
+    // conformer layers, all [d_model, T', B]. We return the raw [d_model, Tp, B]
+    // tensor and do the channels-first transpose host-side while splitting per
+    // item (see the index mapping below).
+    GraphInputPool pool;
+    Subsampling sub(ml_);
+    int Tp = 0;
+    std::vector<int> vout;
+    // Per-item entry valid frames: offline convention is T-1 per clip.
+    std::vector<int> vin(mels.B);
+    for (int b = 0; b < mels.B; ++b) vin[b] = mels.valid_T[b] - 1;
+
+    std::vector<float> flat; // receives [d_model, Tp, B] (ne0=d_model fastest)
+    bool ok = pk::run_graph(/*mem_bytes*/0, /*n_threads*/0,
+        [&](ggml_context* ctx) -> ggml_tensor* {
+            // ---- 1. Subsampling (batched): mel -> x [d_model, T', B] (+ valid). ----
+            ggml_tensor* x = sub.build_graph_batched(ctx, mels.data.data(),
+                                mels.n_mels, mels.T_max, mels.B, pool, Tp, vout, vin);
+            assert((int)x->ne[0] == d_model_);
+
+            // ---- 2. xscaling (gated; off for this model). ----
+            if (xscaling_) x = ggml_scale(ctx, x, std::sqrt((float)d_model_));
+
+            // ---- 3. Relative positional encoding pos_emb [d_model, 2T'-1]. ----
+            const int pos_len = 2 * Tp - 1;
+            std::vector<float>& pe_host = pool.alloc_f32();
+            rel_pos_encoding(Tp, d_model_, pe_host); // row-major [pos_len, d_model]
+            int64_t pe_ne[2] = {d_model_, pos_len};
+            ggml_tensor* pe = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, pe_ne,
+                                  pe_host.data(), pe_host.size() * sizeof(float));
+
+            // ---- 4. Conformer layer stack (all in-graph, shared pe). ----
+            for (int i = 0; i < n_layers_; ++i) {
+                ConformerLayer layer(ml_, i);
+                x = layer.build_graph_batched(ctx, x, Tp, mels.B, pe, pos_len, vout, pool);
+            }
+            return x; // [d_model, Tp, B]
+        }, flat);
+
+    assert(ok && "batched encoder graph failed");
+    (void)ok;
+
+    // flat is the [d_model, Tp, B] tensor flattened in ggml order (ne0=d_model
+    // fastest): element (c, t, b) sits at index ((size_t)b*Tp + t)*d_model_ + c.
+    // Split per item and transpose to channels-first [d_model, Tp]
+    // (enc_out[c*Tp + t]), matching what forward()/forward_capture return.
+    d_model = d_model_;
+    Tout = Tp;
+    valid_Tout = vout;
+    // Each enc_outs[b] is channels-first [d_model, valid_Tout[b]]: compact to the
+    // per-item non-pad frame count so the row stride equals valid_Tout[b]. The
+    // fused graph runs every item at the padded width Tp, but the trailing
+    // (Tp - vout[b]) columns are pad-derived; emitting them would (a) make the
+    // row stride differ from valid_Tout[b] (decoders index enc_out[c*Tout + t]
+    // with Tout = valid_Tout[b]) and (b) feed pad frames into the decoder. Both
+    // corrupt a padded (shorter) item's decode.
+    enc_outs.assign(mels.B, std::vector<float>());
+    for (int b = 0; b < mels.B; ++b) {
+        const int tv = vout[b];
+        enc_outs[b].resize((size_t)d_model_ * tv);
+        for (int t = 0; t < tv; ++t)
+            for (int c = 0; c < d_model_; ++c)
+                enc_outs[b][(size_t)c * tv + t] =
+                    flat[(((size_t)b * Tp) + t) * d_model_ + c];
+    }
+}
+
 } // namespace pk

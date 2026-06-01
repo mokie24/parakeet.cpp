@@ -16,7 +16,7 @@
 #include <vector>
 
 // ABI version. Bump on breaking changes.
-#define PARAKEET_CAPI_ABI_VERSION 1
+#define PARAKEET_CAPI_ABI_VERSION 2
 
 // The opaque context: a loaded model plus a buffer for the last error message.
 struct parakeet_ctx {
@@ -246,6 +246,53 @@ extern "C" char* parakeet_capi_transcribe_pcm(parakeet_ctx* ctx, const float* sa
     }
 }
 
+extern "C" int parakeet_capi_transcribe_pcm_batch(parakeet_ctx* ctx,
+                                                  const float* const* samples,
+                                                  const int* n_samples, int n_clips,
+                                                  int sample_rate, int decoder,
+                                                  char** out) {
+    if (!ctx) return 1;
+    if (!ctx->model) { ctx->last_error = "context has no loaded model"; return 1; }
+    if (!samples || !n_samples || !out || n_clips < 0) {
+        ctx->last_error = "invalid batch arguments";
+        return 1;
+    }
+    // Contract: on any error path (validation, exception, OOM) every out[]
+    // entry is left NULL, so the caller owns nothing and frees nothing.
+    for (int i = 0; i < n_clips; ++i) out[i] = nullptr;
+    try {
+        std::vector<std::vector<float>> pcms(n_clips);
+        for (int i = 0; i < n_clips; ++i) {
+            if (!samples[i] || n_samples[i] < 0) {
+                ctx->last_error = "invalid samples buffer in batch";
+                return 1;
+            }
+            pcms[i].assign(samples[i], samples[i] + n_samples[i]);
+        }
+        std::vector<std::string> texts =
+            ctx->model->transcribe_pcm_batch(pcms, sample_rate, to_decoder(decoder));
+        ctx->last_error.clear();
+        for (int i = 0; i < n_clips; ++i) {
+            char* s = dup_to_c(texts[i]);
+            if (!s) {
+                // Roll back the strings already allocated this call so every
+                // out[] entry is NULL on return (out[i..] are already NULL).
+                for (int j = 0; j < i; ++j) { std::free(out[j]); out[j] = nullptr; }
+                ctx->last_error = "out of memory";
+                return 2;
+            }
+            out[i] = s;
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        ctx->last_error = e.what();
+        return 3;
+    } catch (...) {
+        ctx->last_error = "unknown error";
+        return 3;
+    }
+}
+
 extern "C" char* parakeet_capi_transcribe_path_json(parakeet_ctx* ctx,
                                                     const char* wav_path,
                                                     int decoder) {
@@ -270,6 +317,45 @@ extern "C" char* parakeet_capi_transcribe_path_json(parakeet_ctx* ctx,
     } catch (...) {
         ctx->last_error = "unknown error";
         return nullptr;
+    }
+}
+
+extern "C" char* parakeet_capi_transcribe_pcm_batch_json(parakeet_ctx* ctx,
+        const float* samples_concat, const int* n_samples, int n_clips,
+        int sample_rate, int decoder) {
+    if (!ctx) return nullptr;
+    if (!ctx->model) { ctx->last_error = "context has no loaded model"; return nullptr; }
+    if (!samples_concat || !n_samples || n_clips < 0) {
+        ctx->last_error = "invalid batch arguments"; return nullptr;
+    }
+    try {
+        std::vector<std::vector<float>> pcms(n_clips);
+        size_t off = 0;
+        for (int i = 0; i < n_clips; ++i) {
+            if (n_samples[i] < 0) { ctx->last_error = "invalid clip length"; return nullptr; }
+            pcms[i].assign(samples_concat + off, samples_concat + off + n_samples[i]);
+            off += (size_t)n_samples[i];
+        }
+        std::vector<pk::Transcription> trs =
+            ctx->model->transcribe_pcm_batch_with_timestamps(pcms, sample_rate,
+                                                             to_decoder(decoder));
+        const pk::ParakeetConfig& cfg = ctx->model->config();
+        const float frame_sec =
+            (float)cfg.hop_length * (float)cfg.subsampling_factor / (float)cfg.sample_rate;
+        std::string json = "[";
+        for (size_t i = 0; i < trs.size(); ++i) {
+            if (i) json += ',';
+            json += transcription_to_json(trs[i], frame_sec);
+        }
+        json += "]";
+        ctx->last_error.clear();
+        char* out = dup_to_c(json);
+        if (!out) { ctx->last_error = "out of memory"; return nullptr; }
+        return out;
+    } catch (const std::exception& e) {
+        ctx->last_error = e.what(); return nullptr;
+    } catch (...) {
+        ctx->last_error = "unknown error"; return nullptr;
     }
 }
 

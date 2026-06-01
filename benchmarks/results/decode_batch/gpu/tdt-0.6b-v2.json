@@ -1,0 +1,50 @@
+{
+  "model": "tdt-0.6b-v2",
+  "decoder": "tdt",
+  "backend": "CUDA0",
+  "dtype": "f16",
+  "threads": 8,
+  "reps": 5,
+  "clip_frames": 131,
+  "d_model": 1024,
+  "batch_sizes": [
+    1,
+    4,
+    8,
+    16
+  ],
+  "rows": [
+    {
+      "B": 1,
+      "serial_ms": 17.33,
+      "batched_ms": 17.37,
+      "speedup": 1.0,
+      "serial_cps": 57.7,
+      "batched_cps": 57.6
+    },
+    {
+      "B": 4,
+      "serial_ms": 69.34,
+      "batched_ms": 19.22,
+      "speedup": 3.61,
+      "serial_cps": 57.7,
+      "batched_cps": 208.1
+    },
+    {
+      "B": 8,
+      "serial_ms": 139.06,
+      "batched_ms": 20.21,
+      "speedup": 6.88,
+      "serial_cps": 57.5,
+      "batched_cps": 395.9
+    },
+    {
+      "B": 16,
+      "serial_ms": 279.11,
+      "batched_ms": 22.47,
+      "speedup": 12.42,
+      "serial_cps": 57.3,
+      "batched_cps": 712.0
+    }
+  ]
+}
