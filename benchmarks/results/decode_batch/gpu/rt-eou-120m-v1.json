@@ -1,0 +1,50 @@
+{
+  "model": "rt-eou-120m-v1",
+  "decoder": "rnnt",
+  "backend": "CUDA0",
+  "dtype": "f16",
+  "threads": 8,
+  "reps": 5,
+  "clip_frames": 132,
+  "d_model": 512,
+  "batch_sizes": [
+    1,
+    4,
+    8,
+    16
+  ],
+  "rows": [
+    {
+      "B": 1,
+      "serial_ms": 10.44,
+      "batched_ms": 10.67,
+      "speedup": 0.98,
+      "serial_cps": 95.7,
+      "batched_cps": 93.7
+    },
+    {
+      "B": 4,
+      "serial_ms": 42.6,
+      "batched_ms": 13.68,
+      "speedup": 3.11,
+      "serial_cps": 93.9,
+      "batched_cps": 292.4
+    },
+    {
+      "B": 8,
+      "serial_ms": 86.26,
+      "batched_ms": 14.69,
+      "speedup": 5.87,
+      "serial_cps": 92.7,
+      "batched_cps": 544.8
+    },
+    {
+      "B": 16,
+      "serial_ms": 172.51,
+      "batched_ms": 16.82,
+      "speedup": 10.25,
+      "serial_cps": 92.7,
+      "batched_cps": 951.1
+    }
+  ]
+}

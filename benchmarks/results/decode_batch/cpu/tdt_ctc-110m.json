@@ -1,0 +1,50 @@
+{
+  "model": "tdt_ctc-110m-q5_k.gguf",
+  "decoder": "tdt",
+  "backend": "cpu",
+  "dtype": "q5_k",
+  "threads": 8,
+  "reps": 5,
+  "clip_frames": 131,
+  "d_model": 512,
+  "batch_sizes": [
+    1,
+    4,
+    8,
+    16
+  ],
+  "rows": [
+    {
+      "B": 1,
+      "serial_ms": 5.66,
+      "batched_ms": 5.5,
+      "speedup": 1.03,
+      "serial_cps": 176.8,
+      "batched_cps": 182.0
+    },
+    {
+      "B": 4,
+      "serial_ms": 17.7,
+      "batched_ms": 7.2,
+      "speedup": 2.46,
+      "serial_cps": 225.9,
+      "batched_cps": 555.6
+    },
+    {
+      "B": 8,
+      "serial_ms": 35.67,
+      "batched_ms": 11.42,
+      "speedup": 3.12,
+      "serial_cps": 224.3,
+      "batched_cps": 700.3
+    },
+    {
+      "B": 16,
+      "serial_ms": 69.27,
+      "batched_ms": 19.17,
+      "speedup": 3.61,
+      "serial_cps": 231.0,
+      "batched_cps": 834.5
+    }
+  ]
+}

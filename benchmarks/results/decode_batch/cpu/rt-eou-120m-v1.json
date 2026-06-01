@@ -1,0 +1,50 @@
+{
+  "model": "realtime_eou_120m-v1-q5_k.gguf",
+  "decoder": "ctc",
+  "backend": "cpu",
+  "dtype": "q5_k",
+  "threads": 8,
+  "reps": 5,
+  "clip_frames": 132,
+  "d_model": 512,
+  "batch_sizes": [
+    1,
+    4,
+    8,
+    16
+  ],
+  "rows": [
+    {
+      "B": 1,
+      "serial_ms": 5.08,
+      "batched_ms": 5.07,
+      "speedup": 1.0,
+      "serial_cps": 196.9,
+      "batched_cps": 197.3
+    },
+    {
+      "B": 4,
+      "serial_ms": 20.31,
+      "batched_ms": 8.75,
+      "speedup": 2.32,
+      "serial_cps": 196.9,
+      "batched_cps": 457.4
+    },
+    {
+      "B": 8,
+      "serial_ms": 42.16,
+      "batched_ms": 14.07,
+      "speedup": 3.0,
+      "serial_cps": 189.8,
+      "batched_cps": 568.6
+    },
+    {
+      "B": 16,
+      "serial_ms": 84.35,
+      "batched_ms": 25.07,
+      "speedup": 3.36,
+      "serial_cps": 189.7,
+      "batched_cps": 638.1
+    }
+  ]
+}

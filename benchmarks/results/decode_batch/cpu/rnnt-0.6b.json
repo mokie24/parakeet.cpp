@@ -1,0 +1,50 @@
+{
+  "model": "rnnt-0.6b-q5_k.gguf",
+  "decoder": "ctc",
+  "backend": "cpu",
+  "dtype": "q5_k",
+  "threads": 8,
+  "reps": 5,
+  "clip_frames": 131,
+  "d_model": 1024,
+  "batch_sizes": [
+    1,
+    4,
+    8,
+    16
+  ],
+  "rows": [
+    {
+      "B": 1,
+      "serial_ms": 13.32,
+      "batched_ms": 13.65,
+      "speedup": 0.98,
+      "serial_cps": 75.1,
+      "batched_cps": 73.3
+    },
+    {
+      "B": 4,
+      "serial_ms": 54.99,
+      "batched_ms": 19.56,
+      "speedup": 2.81,
+      "serial_cps": 72.7,
+      "batched_cps": 204.5
+    },
+    {
+      "B": 8,
+      "serial_ms": 103.03,
+      "batched_ms": 26.35,
+      "speedup": 3.91,
+      "serial_cps": 77.7,
+      "batched_cps": 303.6
+    },
+    {
+      "B": 16,
+      "serial_ms": 211.7,
+      "batched_ms": 42.23,
+      "speedup": 5.01,
+      "serial_cps": 75.6,
+      "batched_cps": 378.9
+    }
+  ]
+}

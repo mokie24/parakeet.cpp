@@ -242,8 +242,9 @@ def _decode_batch_subtable(json_dir: Path, kind: str) -> str:
     threads = meta.get("threads", "?")
     backend = meta.get("backend", "?")
     reps = meta.get("reps", "?")
+    dtype = meta.get("dtype", "?")
     caption = (
-        f"**{kind}** ({threads} threads, backend={backend}, dtype from filename), "
+        f"**{kind}** ({backend}, {dtype}, {threads} threads), "
         f"best-of-{reps}, one clip replicated B times."
     )
 
