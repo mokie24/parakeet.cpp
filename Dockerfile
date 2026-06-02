@@ -10,11 +10,12 @@
 #   CPU (default):
 #     docker build -t parakeet.cpp:cpu .
 #
-#   CUDA:
+#   CUDA (GGML_CUDA_NO_VMM=ON drops the libcuda driver-lib link dependency,
+#   which a GPU-less build container does not have):
 #     docker build -t parakeet.cpp:cuda \
 #       --build-arg BUILD_BASE=nvidia/cuda:13.0.1-devel-ubuntu24.04 \
 #       --build-arg RUNTIME_BASE=nvidia/cuda:13.0.1-runtime-ubuntu24.04 \
-#       --build-arg CMAKE_EXTRA_ARGS=-DPARAKEET_GGML_CUDA=ON .
+#       --build-arg "CMAKE_EXTRA_ARGS=-DPARAKEET_GGML_CUDA=ON -DGGML_CUDA_NO_VMM=ON" .
 #
 # The build context must be a checkout with the ggml submodule populated
 # (git clone --recursive, or actions/checkout with submodules: recursive).
@@ -30,6 +31,10 @@ FROM ${BUILD_BASE} AS build
 
 # Extra cmake flags appended verbatim (e.g. -DPARAKEET_GGML_CUDA=ON).
 ARG CMAKE_EXTRA_ARGS=""
+# CUDA architectures, passed as a quoted CMAKE_CUDA_ARCHITECTURES list so the
+# ';' separator survives the shell (e.g. "90;121-real"). Empty = let ggml pick
+# its default broad list. Kept separate from CMAKE_EXTRA_ARGS for that reason.
+ARG CUDA_ARCHS=""
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -57,6 +62,7 @@ RUN cmake -B build \
         -DPARAKEET_BUILD_CLI=ON \
         -DPARAKEET_BUILD_TESTS=OFF \
         ${CMAKE_EXTRA_ARGS} \
+        ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"} \
     && cmake --build build -j"$(nproc)"
 
 # Stage the binary and every backend shared library (CPU, and CUDA when built)
