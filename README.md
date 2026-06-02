@@ -111,6 +111,8 @@ docker run --rm --gpus all \
   transcribe --model /models/parakeet-tdt_ctc-110m-q5_k.gguf --input /audio/speech.wav --decoder tdt
 ```
 
+The CUDA image is built on CUDA 13, so it covers everything from Turing up through Blackwell, including GB10 / Grace-Blackwell (DGX Spark) on arm64.
+
 To build the image yourself, see the build args at the top of the [`Dockerfile`](Dockerfile). The CPU image is the portable `GGML_NATIVE=OFF` build, so it runs on any amd64 or arm64 host.
 
 ---

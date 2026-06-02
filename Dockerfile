@@ -12,8 +12,8 @@
 #
 #   CUDA:
 #     docker build -t parakeet.cpp:cuda \
-#       --build-arg BUILD_BASE=nvidia/cuda:12.6.2-devel-ubuntu24.04 \
-#       --build-arg RUNTIME_BASE=nvidia/cuda:12.6.2-runtime-ubuntu24.04 \
+#       --build-arg BUILD_BASE=nvidia/cuda:13.0.1-devel-ubuntu24.04 \
+#       --build-arg RUNTIME_BASE=nvidia/cuda:13.0.1-runtime-ubuntu24.04 \
 #       --build-arg CMAKE_EXTRA_ARGS=-DPARAKEET_GGML_CUDA=ON .
 #
 # The build context must be a checkout with the ggml submodule populated

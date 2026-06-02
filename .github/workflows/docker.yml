@@ -8,6 +8,10 @@ name: docker
 # ubuntu-24.04, arm64 on ubuntu-24.04-arm. The per-arch images are pushed by
 # digest, then a merge job assembles one multi-arch manifest per variant.
 #
+# The CUDA images use the CUDA 13 base so ggml compiles the Blackwell
+# architectures (sm_120 + sm_121); that is what makes the arm64 CUDA image run
+# on GB10 / Grace-Blackwell (DGX Spark). CUDA 12.6 tops out at sm_90.
+#
 # On pull_request the images are built but NOT pushed, so the Dockerfile stays
 # a merge gate. On push to the default branch, tags, and manual dispatch the
 # images are pushed.
@@ -53,14 +57,14 @@ jobs:
           - variant: cuda
             arch: amd64
             runner: ubuntu-24.04
-            build_base: nvidia/cuda:12.6.2-devel-ubuntu24.04
-            runtime_base: nvidia/cuda:12.6.2-runtime-ubuntu24.04
+            build_base: nvidia/cuda:13.0.1-devel-ubuntu24.04
+            runtime_base: nvidia/cuda:13.0.1-runtime-ubuntu24.04
             cmake_args: "-DPARAKEET_GGML_CUDA=ON"
           - variant: cuda
             arch: arm64
             runner: ubuntu-24.04-arm
-            build_base: nvidia/cuda:12.6.2-devel-ubuntu24.04
-            runtime_base: nvidia/cuda:12.6.2-runtime-ubuntu24.04
+            build_base: nvidia/cuda:13.0.1-devel-ubuntu24.04
+            runtime_base: nvidia/cuda:13.0.1-runtime-ubuntu24.04
             cmake_args: "-DPARAKEET_GGML_CUDA=ON"
     steps:
       - name: Checkout (with submodules)
