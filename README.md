@@ -94,7 +94,7 @@ The CLI auto-selects the first GPU device the ggml registry reports, so no runti
 
 ## Docker
 
-Prebuilt images are published to GitHub Container Registry on every push to `master`. They contain just the `parakeet-cli` binary, so mount a converted `.gguf` model and your audio at runtime:
+Prebuilt images are published to GitHub Container Registry on every push to `master`. They contain just the `parakeet-cli` binary, so mount a converted `.gguf` model and your audio at runtime. Both the CPU and CUDA images are multi-arch (`linux/amd64` and `linux/arm64`), so the right one is pulled for your host automatically:
 
 ```sh
 # CPU
@@ -111,7 +111,7 @@ docker run --rm --gpus all \
   transcribe --model /models/parakeet-tdt_ctc-110m-q5_k.gguf --input /audio/speech.wav --decoder tdt
 ```
 
-To build the image yourself, see the build args at the top of the [`Dockerfile`](Dockerfile). The CPU image is the portable `GGML_NATIVE=OFF` build, so it runs on any x86-64 host.
+To build the image yourself, see the build args at the top of the [`Dockerfile`](Dockerfile). The CPU image is the portable `GGML_NATIVE=OFF` build, so it runs on any amd64 or arm64 host.
 
 ---
 
