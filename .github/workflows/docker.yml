@@ -1,0 +1,87 @@
+name: docker
+
+# Build the parakeet.cpp container images and publish them to GitHub Container
+# Registry (ghcr.io/<owner>/parakeet.cpp).
+#
+# On pull_request the images are built but NOT pushed, so the Dockerfile stays
+# a merge gate. On push to the default branch, tags, and manual dispatch the
+# images are pushed.
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  # Named for the binary it ships, so a future server image can live alongside
+  # it (e.g. parakeet.cpp-server). Resolves to <owner>/parakeet.cpp-cli.
+  IMAGE_NAME: ${{ github.repository }}-cli
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: cpu
+            build_base: ubuntu:24.04
+            runtime_base: ubuntu:24.04
+            cmake_args: ""
+            suffix: ""
+          - variant: cuda
+            build_base: nvidia/cuda:12.6.2-devel-ubuntu24.04
+            runtime_base: nvidia/cuda:12.6.2-runtime-ubuntu24.04
+            cmake_args: "-DPARAKEET_GGML_CUDA=ON"
+            suffix: "-cuda"
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Only authenticate when we actually push (i.e. not on pull_request).
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # cpu  -> latest, sha-xxxx, vX.Y.Z
+          # cuda -> latest-cuda, sha-xxxx-cuda, vX.Y.Z-cuda
+          flavor: |
+            suffix=${{ matrix.suffix }},onlatest=true
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha
+
+      - name: Build and push (${{ matrix.variant }})
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          build-args: |
+            BUILD_BASE=${{ matrix.build_base }}
+            RUNTIME_BASE=${{ matrix.runtime_base }}
+            CMAKE_EXTRA_ARGS=${{ matrix.cmake_args }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
