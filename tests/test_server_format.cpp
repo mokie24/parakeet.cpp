@@ -1,6 +1,7 @@
 #include "openai_format.hpp"
 #include "transcription.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -48,6 +49,13 @@ int main() {
 
     Response rvn = format_transcription(tr, Format::kVerboseJson, 7.4, false);
     check(!contains(rvn.body, "\"words\":["), "verbose words gated off");
+
+    // A NaN duration must not leak an invalid JSON literal (the fixed() guard
+    // emits 0, matching src/parakeet_capi.cpp's append_json_float).
+    Response rnan = format_transcription(tr, Format::kVerboseJson,
+                                         std::nan(""), false);
+    check(contains(rnan.body, "\"duration\":0"), "NaN duration -> 0");
+    check(!contains(rnan.body, "nan"), "no nan literal in json");
 
     // error envelope
     std::string e = error_body("bad", "invalid_request_error");

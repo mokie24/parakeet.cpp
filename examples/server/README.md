@@ -78,8 +78,8 @@ with open("audio.wav", "rb") as f:
 - `verbose_json` emits a single `segment` spanning the whole transcript;
   Parakeet has no native segmentation. Word timestamps are real.
 - `language` in `verbose_json` is a fixed `en` placeholder.
-- `model` in the request is echoed but does not switch models; the process
-  serves the one model given to `--model`.
+- `model` in the request is accepted but ignored; the process serves the one
+  model given to `--model`.
 - `temperature` and `prompt` are accepted and ignored (greedy decode).
 - Inference is serialized by a mutex. For real parallelism, hold a pool of
   `pk::Model` contexts instead of one.
