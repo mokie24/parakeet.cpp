@@ -1,8 +1,12 @@
 #include "model_fetch.hpp"
 
+#include <cerrno>
 #include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
+
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 
@@ -101,9 +105,35 @@ std::string default_cache_dir() {
     return base + "/parakeet.cpp/models";
 }
 
+// `tool` is always a hardcoded literal ("curl"/"wget"), never user input.
 static bool have_tool(const char* tool) {
     std::string cmd = std::string("command -v ") + tool + " >/dev/null 2>&1";
     return std::system(cmd.c_str()) == 0;
+}
+
+// Run args[0] with the given arguments directly via execvp (no shell). Returns
+// the child exit status (0 == success), or -1 if it could not be spawned.
+// Passing the URL and paths as literal argv entries means no shell metacharacter
+// in them can ever be interpreted, so an attacker-shaped URL cannot inject a
+// command (unlike building a std::system string). POSIX only, which is fine:
+// this example targets Linux and macOS.
+static int run_argv(const std::vector<std::string>& args) {
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        execvp(argv[0], argv.data());
+        _exit(127);  // exec failed (tool vanished between have_tool and here)
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return -1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
 std::string fetch_model(const ModelSource& src, const std::string& cache_dir) {
@@ -116,20 +146,22 @@ std::string fetch_model(const ModelSource& src, const std::string& cache_dir) {
     fs::path part = final_path;
     part += ".part";
 
-    // src.value and src.cache_name are validated by resolve_model (https scheme,
-    // safe filename). Quote them anyway.
-    std::string cmd;
+    // The URL and target path are passed as literal argv entries to execvp, so
+    // they are never parsed by a shell. (resolve_model only guarantees the
+    // scheme and the cache_name basename; the rest of the URL is untrusted, so
+    // we must not interpolate it into a shell command.)
+    std::vector<std::string> args;
     if (have_tool("curl")) {
-        cmd = "curl -fSL --retry 3 -o '" + part.string() + "' '" + src.value + "'";
+        args = {"curl", "-fSL", "--retry", "3", "-o", part.string(), src.value};
     } else if (have_tool("wget")) {
-        cmd = "wget -O '" + part.string() + "' '" + src.value + "'";
+        args = {"wget", "-O", part.string(), src.value};
     } else {
         throw std::runtime_error(
             "no curl or wget on PATH to download " + src.value +
             "; download it manually and pass the local path to --model");
     }
 
-    int rc = std::system(cmd.c_str());
+    int rc = run_argv(args);
     if (rc != 0) {
         std::error_code ec;
         fs::remove(part, ec);
@@ -139,6 +171,7 @@ std::string fetch_model(const ModelSource& src, const std::string& cache_dir) {
     std::error_code ec;
     fs::rename(part, final_path, ec);
     if (ec) {
+        fs::remove(part, ec);  // do not leave a stray .part behind
         throw std::runtime_error("could not finalize download at " +
                                  final_path.string() + ": " + ec.message());
     }

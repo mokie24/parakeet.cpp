@@ -42,6 +42,12 @@ int main() {
     check(!resolve_model("definitely-not-a-model", s, err), "unknown rejected");
     check(!err.empty(), "unknown sets err");
 
+    // A URL whose basename carries shell metacharacters is rejected by the
+    // safe_name guard (the security control on the download path).
+    check(!resolve_model("https://h/foo;rm.gguf", s, err), "unsafe ; rejected");
+    check(!resolve_model("https://h/foo'bar.gguf", s, err), "unsafe quote rejected");
+    check(!resolve_model("https://h/..", s, err), "dotdot basename rejected");
+
     if (fails) { std::fprintf(stderr, "%d checks failed\n", fails); return 1; }
     std::printf("test_server_resolve: OK\n");
     return 0;
