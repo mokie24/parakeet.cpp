@@ -37,6 +37,9 @@ std::string json_escape(const std::string& s) {
 }
 
 static std::string fixed(double v, int prec) {
+    // JSON has no NaN/Inf literal; emit 0 instead, matching the repo's
+    // append_json_float convention in src/parakeet_capi.cpp.
+    if (!(v == v) || v > 1e30 || v < -1e30) return "0";
     char buf[64];
     std::snprintf(buf, sizeof(buf), "%.*f", prec, v);
     return buf;
@@ -58,7 +61,7 @@ Response format_transcription(const pk::Transcription& tr, Format fmt,
     // verbose_json
     std::string b = "{";
     b += "\"task\":\"transcribe\",";
-    b += "\"language\":\"en\",";  // fixed placeholder; see README
+    b += "\"language\":\"en\",";  // fixed: models here are English (no detection)
     b += "\"duration\":" + fixed(duration_sec, 3) + ",";
     b += "\"text\":\"" + json_escape(tr.text) + "\",";
     // Single synthetic segment: Parakeet emits no native segmentation.
