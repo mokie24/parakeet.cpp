@@ -7,10 +7,8 @@
 #include "ggml_graph.hpp"     // pk::set_num_threads, pk::shutdown_backend
 #include "dr_wav.h"           // declarations only; impl lives in libparakeet
 
-#include <atomic>
 #include <csignal>
 #include <cstdio>
-#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -22,15 +20,19 @@ httplib::Server* g_server = nullptr;
 void on_signal(int) { if (g_server) g_server->stop(); }
 
 // Decode WAV bytes in memory into mono float PCM. Returns false if the bytes
-// are not a decodable WAV. The model resamples to 16 kHz internally, so the
-// native sample rate is returned as-is.
+// are not a decodable, non-empty WAV (so a bad/empty upload becomes a 400, not
+// a 500 from the inference path). The model resamples to 16 kHz internally, so
+// the native sample rate is returned as-is.
 bool decode_wav_mem(const std::string& bytes, std::vector<float>& mono,
                     int& sample_rate) {
     unsigned int ch = 0, sr = 0;
     drwav_uint64 frames = 0;
     float* pcm = drwav_open_memory_and_read_pcm_frames_f32(
         bytes.data(), bytes.size(), &ch, &sr, &frames, nullptr);
-    if (!pcm || ch == 0) { if (pcm) drwav_free(pcm, nullptr); return false; }
+    if (!pcm || ch == 0 || sr == 0 || frames == 0) {
+        if (pcm) drwav_free(pcm, nullptr);
+        return false;
+    }
     mono.resize(frames);
     for (drwav_uint64 i = 0; i < frames; ++i) {
         double acc = 0;
