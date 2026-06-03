@@ -18,11 +18,12 @@ PORT="${PARAKEET_SERVER_E2E_PORT:-18080}"
 CACHE="$(mktemp -d)"
 EXPECT="turning away her"
 
-command -v curl >/dev/null 2>&1 || { echo "server_e2e: curl required"; exit 1; }
-[ -f "$FIXTURE" ] || { echo "server_e2e: missing $FIXTURE"; exit 1; }
-
+# Arm cleanup before the pre-flight guards so a failed guard still removes CACHE.
 cleanup() { [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null; rm -rf "$CACHE"; }
 trap cleanup EXIT
+
+command -v curl >/dev/null 2>&1 || { echo "server_e2e: curl required"; exit 1; }
+[ -f "$FIXTURE" ] || { echo "server_e2e: missing $FIXTURE"; exit 1; }
 
 "$SERVER" --model tdt_ctc-110m-q4_k --port "$PORT" --cache-dir "$CACHE" &
 SRV=$!
