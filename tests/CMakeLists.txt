@@ -63,6 +63,16 @@ target_link_libraries(test_server_format PRIVATE parakeet)
 add_test(NAME test_server_format COMMAND test_server_format)
 set_tests_properties(test_server_format PROPERTIES SKIP_RETURN_CODE 77)
 
+add_executable(test_server_resolve test_server_resolve.cpp
+               ${CMAKE_SOURCE_DIR}/examples/server/model_fetch.cpp)
+target_include_directories(test_server_resolve PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/examples/server
+    ${CMAKE_SOURCE_DIR}/third_party)
+target_link_libraries(test_server_resolve PRIVATE parakeet)
+add_test(NAME test_server_resolve COMMAND test_server_resolve
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+set_tests_properties(test_server_resolve PROPERTIES SKIP_RETURN_CODE 77)
+
 set_tests_properties(test_model_loader test_mel test_mel_gpu test_subsampling test_subsampling_batch test_relpos_attention test_relpos_attention_batch
                      test_conformer test_conformer_batch test_conv_eou test_encoder test_encoder_batch test_encoder_eou
                      test_streaming_encoder test_ctc test_prediction
