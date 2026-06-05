@@ -312,6 +312,101 @@ ggml_tensor* RelPosAttention::build_graph_batched(
     return linear("linear_out.weight", "linear_out.bias", merged); // [D, T, B]
 }
 
+ggml_tensor* RelPosAttention::build_graph_batched_local(
+        ggml_context* ctx, ggml_tensor* xt, int T, int B, ggml_tensor* pe,
+        int pos_len, const std::vector<int>& valid_len,
+        int att_left, int att_right, GraphInputPool& pool) const {
+    const int D = d_model_, H = n_heads_, dk = d_head_;
+    const int P = pos_len;
+    const float scale = 1.0f / std::sqrt((float)dk);
+    assert(att_left >= 0 && att_right >= 0);
+    assert(P == att_left + att_right + 1);
+    assert((int)valid_len.size() == B);
+
+    const std::string pre = "encoder.layers." + std::to_string(layer_idx_) + ".self_attn.";
+    const ModelLoader& ml = ml_;
+    auto linear = [&](const char* wn, const char* bn, ggml_tensor* in) {
+        ggml_tensor* W = clone_weight(ctx, ml, pre + wn);
+        ggml_tensor* y = ggml_mul_mat(ctx, W, in);
+        if (bn && ml.tensor(pre + bn)) y = ggml_add(ctx, y, clone_weight(ctx, ml, pre + bn));
+        return y;
+    };
+    ggml_tensor* q = linear("linear_q.weight", "linear_q.bias", xt); // [D, T, B]
+    ggml_tensor* k = linear("linear_k.weight", "linear_k.bias", xt);
+    ggml_tensor* v = linear("linear_v.weight", "linear_v.bias", xt);
+    ggml_tensor* p = linear("linear_pos.weight", nullptr, pe);       // [D, P]
+    auto to_heads_b = [&](ggml_tensor* t, int n) {
+        t = ggml_reshape_4d(ctx, t, dk, H, n, B);
+        return ggml_cont(ctx, ggml_permute(ctx, t, 0, 2, 1, 3)); // [dk, n, H, B]
+    };
+    auto to_heads = [&](ggml_tensor* t, int n) {
+        t = ggml_reshape_3d(ctx, t, dk, H, n);
+        return ggml_cont(ctx, ggml_permute(ctx, t, 0, 2, 1, 3)); // [dk, n, H]
+    };
+    ggml_tensor* qh = to_heads_b(q, T), *kh = to_heads_b(k, T);
+    ggml_tensor* vh = to_heads_b(v, T), *php = to_heads(p, P);     // ph shared (ne3=1)
+    ggml_tensor* bu = ggml_reshape_4d(ctx, clone_weight(ctx, ml, pre + "pos_bias_u"), dk, 1, H, 1);
+    ggml_tensor* bv = ggml_reshape_4d(ctx, clone_weight(ctx, ml, pre + "pos_bias_v"), dk, 1, H, 1);
+    ggml_tensor* qu = ggml_add(ctx, qh, bu);  // [dk, T, H, B]
+    ggml_tensor* qv = ggml_add(ctx, qh, bv);  // [dk, T, H, B]
+
+    // Pad K/V along time (ne1); view offset c -> key (t - att_left + c).
+    ggml_tensor* kpad = ggml_pad_ext(ctx, kh, 0,0, att_left,att_right, 0,0, 0,0); // [dk, T+P-1, H, B]
+    ggml_tensor* vpad = ggml_pad_ext(ctx, vh, 0,0, att_left,att_right, 0,0, 0,0);
+
+    // Banded content scores ac[c, t, H, B]; stack on ne0=c.
+    ggml_tensor* ac = nullptr;
+    for (int c = 0; c < P; ++c) {
+        ggml_tensor* kc = ggml_view_4d(ctx, kpad, dk, T, H, B,
+                              kpad->nb[1], kpad->nb[2], kpad->nb[3], (size_t)c * kpad->nb[1]);
+        ggml_tensor* acc = ggml_sum_rows(ctx, ggml_mul(ctx, qu, kc)); // [1, T, H, B]
+        ac = ac ? ggml_concat(ctx, ac, acc, 0) : acc;
+    }
+    ggml_tensor* bd = ggml_mul_mat(ctx, php, qv);  // [P, T, H, B]  (php broadcasts over B)
+    ggml_tensor* scores = ggml_add(ctx, ac, bd);   // [P, T, H, B]
+
+    // Per-item band mask [P, T, 1, B].
+    std::vector<float>& mh = pool.alloc_f32((size_t)B * T * P);
+    for (int b = 0; b < B; ++b) {
+        const int vl = valid_len[b];
+        for (int t = 0; t < T; ++t)
+            for (int c = 0; c < P; ++c) {
+                const int key = t - att_left + c;
+                mh[(size_t)b * T * P + (size_t)t * P + c] = (key >= 0 && key < vl) ? 0.0f : -INFINITY;
+            }
+    }
+    int64_t mne[4] = {P, T, 1, B};
+    ggml_tensor* mask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 4, mne,
+                            mh.data(), mh.size() * sizeof(float));
+    ggml_tensor* prob = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f); // softmax over c
+
+    // context[dk, t, H, B] = sum_c prob[c, t] * v[t-att_left+c].
+    ggml_tensor* context = nullptr;
+    for (int c = 0; c < P; ++c) {
+        ggml_tensor* vc = ggml_view_4d(ctx, vpad, dk, T, H, B,
+                              vpad->nb[1], vpad->nb[2], vpad->nb[3], (size_t)c * vpad->nb[1]);
+        ggml_tensor* pc = ggml_view_4d(ctx, prob, 1, T, H, B,
+                              prob->nb[1], prob->nb[2], prob->nb[3], (size_t)c * prob->nb[0]); // [1,T,H,B]
+        ggml_tensor* term = ggml_mul(ctx, vc, pc);
+        context = context ? ggml_add(ctx, context, term) : term;
+    }
+    // Merge heads [dk, T, H, B] -> [dk, H, T, B] -> [D, T, B].
+    ggml_tensor* merged = ggml_cont(ctx, ggml_permute(ctx, context, 0, 2, 1, 3));
+    merged = ggml_reshape_3d(ctx, merged, D, T, B);
+    bool any_pad = false;
+    for (int b = 0; b < B; ++b) any_pad = any_pad || (valid_len[b] < T);
+    if (any_pad) {
+        std::vector<float>& qm = pool.alloc_f32((size_t)B * T);
+        for (int b = 0; b < B; ++b)
+            for (int t = 0; t < T; ++t) qm[(size_t)b * T + t] = (t < valid_len[b]) ? 1.0f : 0.0f;
+        int64_t qne[3] = {1, T, B};
+        ggml_tensor* qmask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 3, qne,
+                                 qm.data(), qm.size() * sizeof(float));
+        merged = ggml_mul(ctx, merged, qmask);
+    }
+    return linear("linear_out.weight", "linear_out.bias", merged); // [D, T, B]
+}
+
 void RelPosAttention::forward(const std::vector<float>& x, int T,
                               const std::vector<float>& pos_emb, int pos_len,
                               int valid_len,

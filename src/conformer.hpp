@@ -66,10 +66,13 @@ public:
 
     // Batched GRAPH-BUILDER. `xt` is [D, T, B]; `pe` is [D, pos_len] (shared
     // across the batch). `valid_len` is per item (size B). Returns [D, T, B].
+    // att_left/att_right >= 0 routes self-attention to banded local attention
+    // (pe = LOCAL [d_model, att_left+att_right+1]); defaults (-1,-1) = full.
     ggml_tensor* build_graph_batched(ggml_context* ctx, ggml_tensor* xt, int T,
                                      int B, ggml_tensor* pe, int pos_len,
                                      const std::vector<int>& valid_len,
-                                     GraphInputPool& pool) const;
+                                     GraphInputPool& pool,
+                                     int att_left = -1, int att_right = -1) const;
 
     // x: [T, d_model]; pos_emb: [pos_len=2T-1, d_model]; out: [T, d_model].
     void forward(const std::vector<float>& x, int T,

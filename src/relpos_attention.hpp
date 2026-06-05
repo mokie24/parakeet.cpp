@@ -63,6 +63,16 @@ public:
                                      const std::vector<int>& valid_len,
                                      GraphInputPool& pool) const;
 
+    // Batched LOCAL (banded / Longformer) GRAPH-BUILDER. Same as
+    // build_graph_local but for B>1: `xt` is [D, T, B], `pe` is the LOCAL
+    // positional encoding [D, att_left+att_right+1] (shared across the batch),
+    // `valid_len` is per item. Returns [D, T, B]. Banded -> O(T*window) memory.
+    ggml_tensor* build_graph_batched_local(ggml_context* ctx, ggml_tensor* xt, int T,
+                                           int B, ggml_tensor* pe, int pos_len,
+                                           const std::vector<int>& valid_len,
+                                           int att_left, int att_right,
+                                           GraphInputPool& pool) const;
+
     // x: [T, d_model]; pos_emb: [2T-1, d_model]; out: [T, d_model].
     void forward(const std::vector<float>& x, int T,
                  const std::vector<float>& pos_emb, int pos_len,
