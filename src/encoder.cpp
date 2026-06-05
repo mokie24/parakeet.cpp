@@ -15,17 +15,22 @@ namespace pk {
 
 // Decide the self-attention window for an encoder of Tp frames. Returns W>0 to
 // use NeMo rel_pos_local_attn [W,W] (banded, O(T*window)); -1 for full attention.
+//
+// The pad-and-shift kernel adds ~6*(2W+1) graph nodes per layer, so W is capped
+// to stay within the metadata-context budget (backend.cpp kGraphSize); W<=32
+// fits every shipped model. The efficient chunk-matmul construction (follow-up,
+// O(1) nodes) would lift this cap to NeMo's full [128,128].
 static int local_attn_window(int Tp) {
+    constexpr int kMaxLocalWindow = 32;
     if (const char* e = std::getenv("PARAKEET_ATT_CONTEXT")) {
         const int w = std::atoi(e);
-        return w > 0 ? w : -1;              // 0 / negative -> force full attention
+        if (w <= 0) return -1;                 // 0 / negative -> force full attention
+        return w > kMaxLocalWindow ? kMaxLocalWindow : w;
     }
     // Auto: long audio (~>11 min at 8x subsampling) switches to local attention
-    // so full O(T^2) attention can't OOM the device. 128 = NeMo's recommended
-    // long-audio window.
+    // so full O(T^2) attention can't OOM the device.
     constexpr int kLocalThreshold = 8192;
-    constexpr int kDefaultWindow  = 128;
-    return Tp > kLocalThreshold ? kDefaultWindow : -1;
+    return Tp > kLocalThreshold ? kMaxLocalWindow : -1;
 }
 
 Encoder::Encoder(const ModelLoader& ml)

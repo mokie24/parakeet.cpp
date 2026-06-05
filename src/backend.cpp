@@ -23,12 +23,13 @@ size_t last_graph_alloc_bytes() { return g_last_graph_alloc_bytes; }
 
 namespace {
 // Number of graph nodes the metadata context must hold. The biggest single
-// graph today is a streaming conformer layer (~150 nodes); leave generous head
-// room for the fused encoder (~85 layers worth of ops in one graph) and for
-// banded local attention, whose pad-and-shift adds O(window) ops per layer
-// (~6*(2W+1) nodes; W=128 over 17 layers is ~27k). The metadata context is
-// pure descriptors (~336 B each), so this is ~22 MB allocated per compute.
-constexpr size_t kGraphSize = 65536;
+// graph today is the fused encoder. Banded local attention adds O(window) ops
+// per layer (~6*(2W+1) nodes), so the encoder caps its window (see
+// local_attn_window) to stay within this budget; bumping it globally regresses
+// small models (~+22% on tdt_ctc-110m) because the per-compute context + graph
+// hash-set scale with kGraphSize. A larger window needs the efficient
+// chunk-matmul construction (O(1) nodes) instead.
+constexpr size_t kGraphSize = 16384;
 
 struct PendingInput {
     ggml_tensor* tensor;
