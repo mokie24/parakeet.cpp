@@ -37,9 +37,24 @@ public:
     // Returns the attention output [D, T]. Host-built additive masks are fed via
     // pk::graph_input_tensor and registered into `pool` (must outlive compute).
     // Reused by the fused conformer layer and the unit test.
+    //
+    // When att_left/att_right >= 0, an additional SYMMETRIC sliding-window mask
+    // is applied: query qi may attend to key kj only if -att_left <= qi-kj <=
+    // att_right (NeMo rel_pos_local_attn). Defaults (-1, -1) = full context.
     ggml_tensor* build_graph(ggml_context* ctx, ggml_tensor* xt, int T,
                              ggml_tensor* pe, int pos_len, int valid_len,
-                             GraphInputPool& pool) const;
+                             GraphInputPool& pool,
+                             int att_left = -1, int att_right = -1) const;
+
+    // LOCAL (banded / Longformer) GRAPH-BUILDER. Appends NeMo rel_pos_local_attn
+    // ops to a SHARED graph. `xt` is [D, T] and `pe` is the LOCAL positional
+    // encoding [D, att_left+att_right+1]. Each query attends only to keys within
+    // [t-att_left, t+att_right] via pad-and-shift, so peak memory is
+    // O(T * window) not O(T^2). Returns the attention output [D, T].
+    ggml_tensor* build_graph_local(ggml_context* ctx, ggml_tensor* xt, int T,
+                                   ggml_tensor* pe, int pos_len, int valid_len,
+                                   int att_left, int att_right,
+                                   GraphInputPool& pool) const;
 
     // Batched GRAPH-BUILDER. `xt` is [D, T, B]; `pe` is [D, pos_len] (shared
     // across the batch). `valid_len` is per item (size B). Returns [D, T, B].
@@ -53,6 +68,17 @@ public:
                  const std::vector<float>& pos_emb, int pos_len,
                  int valid_len,
                  std::vector<float>& out) const;
+
+    // Local (banded / Longformer) attention — NeMo rel_pos_local_attn. Each
+    // query qi attends only to keys in [qi-att_left, qi+att_right]; pos_emb is
+    // the LOCAL positional encoding [att_left+att_right+1, d_model] (i.e. 2W+1
+    // for a symmetric [W,W] window), NOT the full 2T-1. Output matches NeMo's
+    // Longformer self_attn while bounding memory to O(T * window) instead of
+    // O(T^2). x: [T, d_model]; out: [T, d_model].
+    void forward_local(const std::vector<float>& x, int T,
+                       const std::vector<float>& pos_emb, int pos_len,
+                       int valid_len, int att_left, int att_right,
+                       std::vector<float>& out) const;
 private:
     const ModelLoader& ml_;
     int layer_idx_;

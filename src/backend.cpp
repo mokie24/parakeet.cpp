@@ -16,6 +16,11 @@
 
 namespace pk {
 
+// Gallocr buffer size (bytes) after the most recent single-backend (CPU)
+// compute. Lets tests assert attention memory scales O(T*window), not O(T^2).
+static size_t g_last_graph_alloc_bytes = 0;
+size_t last_graph_alloc_bytes() { return g_last_graph_alloc_bytes; }
+
 namespace {
 // Number of graph nodes the metadata context must hold. The biggest single
 // graph today is a streaming conformer layer (~150 nodes); leave generous head
@@ -242,6 +247,7 @@ bool Backend::compute(const std::function<ggml_tensor*(ggml_context*)>& build,
         }
         alloc_ok = ggml_gallocr_alloc_graph(impl_->galloc, gf);
         if (!alloc_ok) PK_LOG("Backend::compute: ggml_gallocr_alloc_graph failed");
+        else g_last_graph_alloc_bytes = ggml_gallocr_get_buffer_size(impl_->galloc, 0);
     }
     if (!alloc_ok) {
         impl_->pending.clear();

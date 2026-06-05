@@ -40,7 +40,8 @@ RelPosAttention::RelPosAttention(const ModelLoader& ml, int layer_idx)
 ggml_tensor* RelPosAttention::build_graph(ggml_context* ctx, ggml_tensor* xt,
                                           int T, ggml_tensor* pe, int pos_len,
                                           int valid_len,
-                                          GraphInputPool& pool) const {
+                                          GraphInputPool& pool,
+                                          int att_left, int att_right) const {
     // Scalar (B=1) builder: the verbatim v1 2-D/3D relative-position attention
     // graph. The single-clip conformer layer routes here so B=1 runs the lean
     // graph and is bit-exact with v1. build_graph_batched below serves B>1.
@@ -125,6 +126,12 @@ ggml_tensor* RelPosAttention::build_graph(ggml_context* ctx, ggml_tensor* xt,
                     const int ck = kj / chunk_size;
                     const int diff = cq - ck;
                     ok = (diff >= 0 && diff <= left_chunks);
+                }
+                // Symmetric sliding window (NeMo rel_pos_local_attn): keep only
+                // keys within [qi-att_left, qi+att_right].
+                if (ok && att_left >= 0) {
+                    const int rel = qi - kj;
+                    ok = (rel <= att_left) && (rel >= -att_right);
                 }
                 md[(size_t)qi * T + kj] = ok ? 0.0f : ninf;
             }
@@ -329,6 +336,132 @@ void RelPosAttention::forward(const std::vector<float>& x, int T,
             return build_graph(ctx, xt, T, pe, pos_len, valid_len, pool);
         }, out);
     assert(ok && "relpos attention graph failed");
+    (void)ok;
+}
+
+ggml_tensor* RelPosAttention::build_graph_local(ggml_context* ctx, ggml_tensor* xt,
+                                                int T, ggml_tensor* pe, int pos_len,
+                                                int valid_len, int att_left, int att_right,
+                                                GraphInputPool& pool) const {
+    const int D = d_model_, H = n_heads_, dk = d_head_;
+    const int P = pos_len;                 // window width = att_left+att_right+1
+    const float scale = 1.0f / std::sqrt((float)dk);
+    assert(att_left >= 0 && att_right >= 0);
+    assert(P == att_left + att_right + 1);
+
+    // Exact NeMo rel_pos_local_attn (RelPositionMultiHeadAttentionLongformer),
+    // computed in O(T*window) via pad-and-shift instead of NeMo's skew/chunk
+    // tricks. For query t and window column c in [0, P), the key is
+    // (t - att_left + c). NeMo's local pos is ordered index0 = +att_left .. last
+    // = -att_right, so column c uses pos row c directly (matrix_bd = q_v . p^T,
+    // added 1:1 to the banded content scores).
+    {
+        const std::string pre = "encoder.layers." + std::to_string(layer_idx_) + ".self_attn.";
+        const ModelLoader& ml = ml_;
+        auto linear = [&](const char* wn, const char* bn, ggml_tensor* in) {
+            ggml_tensor* W = clone_weight(ctx, ml, pre + wn);
+            ggml_tensor* y = ggml_mul_mat(ctx, W, in);
+            if (bn && ml.tensor(pre + bn)) y = ggml_add(ctx, y, clone_weight(ctx, ml, pre + bn));
+            return y;
+        };
+        ggml_tensor* q = linear("linear_q.weight", "linear_q.bias", xt);
+        ggml_tensor* k = linear("linear_k.weight", "linear_k.bias", xt);
+        ggml_tensor* v = linear("linear_v.weight", "linear_v.bias", xt);
+        ggml_tensor* p = linear("linear_pos.weight", nullptr, pe);
+        auto to_heads = [&](ggml_tensor* t, int n) {
+            t = ggml_reshape_3d(ctx, t, dk, H, n);
+            return ggml_cont(ctx, ggml_permute(ctx, t, 0, 2, 1, 3)); // [dk, n, H]
+        };
+        ggml_tensor* qh = to_heads(q, T), *kh = to_heads(k, T);
+        ggml_tensor* vh = to_heads(v, T), *php = to_heads(p, P);
+        ggml_tensor* bu = ggml_reshape_3d(ctx, clone_weight(ctx, ml, pre + "pos_bias_u"), dk, 1, H);
+        ggml_tensor* bv = ggml_reshape_3d(ctx, clone_weight(ctx, ml, pre + "pos_bias_v"), dk, 1, H);
+        ggml_tensor* qu = ggml_add(ctx, qh, bu);  // [dk, T, H]
+        ggml_tensor* qv = ggml_add(ctx, qh, bv);  // [dk, T, H]
+
+        // Pad K/V along time (ne1): att_left on the left, att_right on the right,
+        // so view offset c yields key (t - att_left + c).
+        ggml_tensor* kpad = ggml_pad_ext(ctx, kh, 0,0, att_left,att_right, 0,0, 0,0); // [dk, T+P-1, H]
+        ggml_tensor* vpad = ggml_pad_ext(ctx, vh, 0,0, att_left,att_right, 0,0, 0,0);
+
+        // Banded content scores ac[c, t, H] = q_u[t] . k[t-att_left+c]; stack on ne0=c.
+        ggml_tensor* ac = nullptr;
+        for (int c = 0; c < P; ++c) {
+            ggml_tensor* kc = ggml_view_3d(ctx, kpad, dk, T, H, kpad->nb[1], kpad->nb[2],
+                                           (size_t)c * kpad->nb[1]);
+            ggml_tensor* acc = ggml_sum_rows(ctx, ggml_mul(ctx, qu, kc)); // [1, T, H]
+            ac = ac ? ggml_concat(ctx, ac, acc, 0) : acc;
+        }
+        // Positional scores bd[c, t, H] = q_v[t] . p[c]  (direct, no rel-shift).
+        ggml_tensor* bd = ggml_mul_mat(ctx, php, qv);   // [P, T, H]
+        ggml_tensor* scores = ggml_add(ctx, ac, bd);    // [P, T, H]
+
+        // Band mask [P, T]: 0 if key in [0, valid_len), else -inf (covers the
+        // out-of-sequence window corners and pad frames).
+        std::vector<float>& mh = pool.alloc_f32((size_t)P * T);
+        for (int t = 0; t < T; ++t)
+            for (int c = 0; c < P; ++c) {
+                const int key = t - att_left + c;
+                mh[(size_t)t * P + c] = (key >= 0 && key < valid_len) ? 0.0f : -INFINITY;
+            }
+        int64_t mne[2] = {P, T};
+        ggml_tensor* mask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, mne,
+                                mh.data(), mh.size() * sizeof(float));
+        ggml_tensor* prob = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f); // softmax over c
+
+        // context[dk, t, H] = sum_c prob[c, t] * v[t-att_left+c].
+        ggml_tensor* context = nullptr;
+        for (int c = 0; c < P; ++c) {
+            ggml_tensor* vc = ggml_view_3d(ctx, vpad, dk, T, H, vpad->nb[1], vpad->nb[2],
+                                           (size_t)c * vpad->nb[1]);
+            ggml_tensor* pc = ggml_view_3d(ctx, prob, 1, T, H, prob->nb[1], prob->nb[2],
+                                           (size_t)c * prob->nb[0]); // [1, T, H]
+            ggml_tensor* term = ggml_mul(ctx, vc, pc);               // broadcast pc over dk
+            context = context ? ggml_add(ctx, context, term) : term;
+        }
+        // Merge heads [dk, T, H] -> [dk, H, T] -> [D, T].
+        ggml_tensor* merged = ggml_cont(ctx, ggml_permute(ctx, context, 0, 2, 1, 3));
+        merged = ggml_reshape_2d(ctx, merged, D, T);
+        if (valid_len < T) { // zero padded query rows -> output = linear_out.bias
+            std::vector<float>& qm = pool.alloc_f32(T);
+            for (int t = 0; t < T; ++t) qm[t] = (t < valid_len) ? 1.0f : 0.0f;
+            int64_t qne[2] = {1, T};
+            ggml_tensor* qmask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, qne,
+                                     qm.data(), qm.size() * sizeof(float));
+            merged = ggml_mul(ctx, merged, qmask);
+        }
+        ggml_tensor* Wo = clone_weight(ctx, ml, pre + "linear_out.weight");
+        ggml_tensor* y = ggml_mul_mat(ctx, Wo, merged);
+        if (ml.tensor(pre + "linear_out.bias"))
+            y = ggml_add(ctx, y, clone_weight(ctx, ml, pre + "linear_out.bias"));
+        return y; // [D, T]
+    }
+}
+
+void RelPosAttention::forward_local(const std::vector<float>& x, int T,
+                                    const std::vector<float>& pos_emb, int pos_len,
+                                    int valid_len, int att_left, int att_right,
+                                    std::vector<float>& out) const {
+    const int D = d_model_;
+    assert((int)x.size() == T * D);
+    assert((int)pos_emb.size() == pos_len * D);
+
+    // Thin wrapper over build_graph_local: feed x/pos_emb as graph inputs and
+    // compute the banded attention sub-graph on the persistent Backend. The
+    // fused conformer encoder calls build_graph_local directly.
+    GraphInputPool pool;
+    bool ok = pk::run_graph(/*mem_bytes*/0, /*n_threads*/4,
+        [&](ggml_context* ctx) -> ggml_tensor* {
+            int64_t xt_ne[2] = {D, T};
+            ggml_tensor* xt = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, xt_ne,
+                                  x.data(), (size_t)T * D * sizeof(float));
+            int64_t pe_ne[2] = {D, pos_len};
+            ggml_tensor* pe = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, pe_ne,
+                                  pos_emb.data(), (size_t)pos_len * D * sizeof(float));
+            return build_graph_local(ctx, xt, T, pe, pos_len, valid_len,
+                                     att_left, att_right, pool);
+        }, out);
+    assert(ok && "relpos local attention graph failed");
     (void)ok;
 }
 
