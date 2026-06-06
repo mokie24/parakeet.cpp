@@ -99,6 +99,7 @@ tests/               ctest targets
                        test_transcribe_eou.cpp , offline EOU model transcript + token ids (PARAKEET_TEST_GGUF_EOU)
                        test_streaming_encoder.cpp, cache-aware streaming encoder == offline + NeMo
                        test_streaming_decode.cpp , streaming RNN-T tokens == NeMo cache-aware streaming
+                       test_streaming_eou_reset.cpp, multi-utterance streaming: decoder resets on <EOU>, transcript == NeMo reset-on-EOU (issue #13; PARAKEET_TEST_BASELINE_EOU_RESET)
                        test_capi_stream.cpp    , streaming C-API transcript == NeMo streaming (PARAKEET_TEST_BASELINE_EOU_STREAM)
                        python/check_convert.py , converter round-trip (model-dependent)
                        python/check_baseline.py, baseline dumper (model-dependent)

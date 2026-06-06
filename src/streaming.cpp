@@ -158,6 +158,28 @@ std::vector<int32_t> StreamingSession::feed_mel_chunk(const std::vector<float>& 
     // Regroup the accumulated tokens; words before the last (still-open) one are
     // final and become available to drain_words().
     regroup_words(/*flush_all=*/false);
+
+    // 4. End-of-utterance reset. The realtime EOU model is trained to emit <EOU>
+    //    (end of utterance) / <EOB> (backchannel) and have the decoder START THE
+    //    NEXT UTTERANCE FROM A FRESH STATE — exactly what NeMo's reference
+    //    streaming driver does (examples/voice_agent .../nemo/streaming_asr.py
+    //    NemoStreamingASRService.transcribe -> reset_state() when <EOU>/<EOB>
+    //    appears in the chunk text). Without this the prediction net stays
+    //    conditioned on the just-emitted <EOU> and the joint scores blank on every
+    //    subsequent frame, so the stream goes silent after the first utterance
+    //    (issue #13). We reset the carried RNN-T decoder state — LSTM h/c to zero
+    //    and last_token back to SOS — for the next chunk. We deliberately reset
+    //    ONLY the decoder, not the StreamingEncoder cache: NeMo's reset_state also
+    //    drops the encoder cache, but that was verified to be a no-op for the
+    //    decoded tokens (decoder-only reset == NeMo's full reset_state byte-for-
+    //    byte on multi-utterance clips), so the validated streaming-encoder path is
+    //    left untouched. enc_frame_ keeps running so <EOU> timestamps stay absolute
+    //    in the clip, and state_.hyp keeps the full token record across utterances.
+    if (last_chunk_had_eou_) {
+        state_.state      = pred_.zero_state();
+        state_.last_token = -1;     // SOS sentinel (nothing emitted yet)
+        state_.have_token = false;
+    }
     return emitted;
 }
 

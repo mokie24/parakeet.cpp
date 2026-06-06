@@ -549,6 +549,24 @@ from `libparakeet.so` (verified via `nm -D`).
   `PARAKEET_TEST_BASELINE_EOU` + `PARAKEET_TEST_BASELINE_EOU_STREAM`).
 - `tests/test_streaming_decode.cpp` (`test_streaming_decode`) — streaming tokens
   == NeMo streaming == offline minus trailing `<EOU>`.
+- `tests/test_streaming_eou_reset.cpp` (`test_streaming_eou_reset`) —
+  multi-utterance streaming. The realtime EOU model emits `<EOU>`/`<EOB>` at the
+  end of each utterance; NeMo's reference streaming driver (voice_agent
+  `NemoStreamingASRService.transcribe` → `reset_state` on `<EOU>`/`<EOB>`) resets
+  the decoder so the NEXT utterance decodes fresh. Without that reset the
+  prediction net stays conditioned on `<EOU>` and the stream goes silent after
+  the first utterance (issue #13). The baseline
+  (`scripts/gen_stream_reset_baseline.py`) builds a two-utterance clip
+  (`speech.wav` + silence + `speech.wav`) so an `<EOU>` fires mid-stream, runs
+  NeMo's cache-aware streaming loop WITH reset-on-EOU, and stores the token
+  sequence; the test asserts our streamed transcript (non-special tokens) matches
+  it EXACTLY and that the second utterance is recovered after the mid-stream
+  `<EOU>`. Skips (exit 77) unless `PARAKEET_TEST_GGUF_EOU` +
+  `PARAKEET_TEST_BASELINE_EOU_RESET` are set. NOTE: `pk::StreamingSession` resets
+  only the decoder state (LSTM + last token), not the encoder cache — verified
+  byte-identical to NeMo's full `reset_state` on the transcript; the lone
+  difference is a possible trailing end-of-clip `<EOU>` (the documented
+  streaming-tail artifact), which never changes the transcript.
 - `tests/test_capi_stream.cpp` (`test_capi_stream`) — feeds `speech.wav` PCM in
   chunks through the streaming C-API; the concatenated text + `finalize` equals
   `baseline.stream_text` from `/tmp/baseline_eou_stream.gguf` (NeMo streaming).
@@ -563,6 +581,11 @@ Reproduce:
     --model nvidia/parakeet_realtime_eou_120m-v1 \
     --audio tests/fixtures/speech.wav --output /tmp/baseline_eou_stream.gguf
 
+# Multi-utterance reset-on-EOU reference (issue #13):
+.venv/bin/python scripts/gen_stream_reset_baseline.py \
+    --model nvidia/parakeet_realtime_eou_120m-v1 \
+    --audio tests/fixtures/speech.wav --output /tmp/baseline_eou_reset.gguf
+
 # CLI streaming:
 ./build/examples/cli/parakeet-cli transcribe \
     --model /tmp/eou.gguf --input tests/fixtures/speech.wav --stream
@@ -573,6 +596,7 @@ Reproduce:
 PARAKEET_TEST_GGUF_EOU=/tmp/eou.gguf \
 PARAKEET_TEST_BASELINE_EOU=/tmp/baseline_eou.gguf \
 PARAKEET_TEST_BASELINE_EOU_STREAM=/tmp/baseline_eou_stream.gguf \
+PARAKEET_TEST_BASELINE_EOU_RESET=/tmp/baseline_eou_reset.gguf \
 ctest --test-dir build -R "test_capi_stream|test_streaming" --output-on-failure
 ```
 
