@@ -690,6 +690,26 @@ ggml_tensor* RelPosAttention::build_graph_local_chunked(
     return y; // [D, T]
 }
 
+ggml_tensor* RelPosAttention::build_graph_batched_local_chunked(
+        ggml_context* ctx, ggml_tensor* xt, int T, int B, ggml_tensor* pe,
+        int pos_len, const std::vector<int>& valid_len, int att_left, int att_right,
+        GraphInputPool& pool, int chunk) const {
+    const int D = d_model_;
+    assert((int)valid_len.size() == B);
+    // Run the O(1) chunk kernel per item (the 4D chunk graph can't also carry a
+    // batch dim), then stack the per-item [D,T] outputs back into [D,T,B].
+    ggml_tensor* out = nullptr;
+    for (int b = 0; b < B; ++b) {
+        ggml_tensor* xb = ggml_view_2d(ctx, xt, D, T, xt->nb[1], (size_t)b * xt->nb[2]);
+        xb = ggml_cont(ctx, xb); // linear() mul_mat wants a dense [D,T] item
+        ggml_tensor* yb = build_graph_local_chunked(ctx, xb, T, pe, pos_len,
+                              valid_len[b], att_left, att_right, pool, chunk); // [D,T]
+        yb = ggml_reshape_3d(ctx, yb, D, T, 1);
+        out = out ? ggml_concat(ctx, out, yb, 2) : yb;
+    }
+    return out; // [D, T, B]
+}
+
 void RelPosAttention::forward_local_chunked(const std::vector<float>& x, int T,
                                             const std::vector<float>& pos_emb, int pos_len,
                                             int valid_len, int att_left, int att_right,

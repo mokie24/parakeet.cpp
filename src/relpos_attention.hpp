@@ -94,6 +94,18 @@ public:
                                int valid_len, int att_left, int att_right,
                                std::vector<float>& out, int chunk = -1) const;
 
+    // Batched CHUNK-MATMUL local GRAPH-BUILDER. `xt` is [D, T, B]; `pe` is the
+    // LOCAL positional encoding [D, att_left+att_right+1] (shared). Runs the O(1)
+    // chunk-matmul construction per item (the 4D chunk kernel can't also carry a
+    // batch dim - ggml is 4D), so this is O(B) nodes, still O(1) in the window.
+    // `valid_len` is per item. Returns [D, T, B]. Same output as
+    // build_graph_batched_local but window-cap-free.
+    ggml_tensor* build_graph_batched_local_chunked(ggml_context* ctx, ggml_tensor* xt,
+                                                   int T, int B, ggml_tensor* pe, int pos_len,
+                                                   const std::vector<int>& valid_len,
+                                                   int att_left, int att_right,
+                                                   GraphInputPool& pool, int chunk = -1) const;
+
     // x: [T, d_model]; pos_emb: [2T-1, d_model]; out: [T, d_model].
     void forward(const std::vector<float>& x, int T,
                  const std::vector<float>& pos_emb, int pos_len,

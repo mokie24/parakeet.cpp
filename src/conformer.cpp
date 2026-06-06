@@ -336,8 +336,8 @@ ggml_tensor* ConformerLayer::build_graph_batched(ggml_context* ctx,
     ggml_tensor* attn_in = layer_norm(r, "norm_self_att");
     RelPosAttention attn(ml_, layer_idx_);
     ggml_tensor* attn_out = local_attn
-        ? attn.build_graph_batched_local(ctx, attn_in, T, B, pe, pos_len, valid_len,
-                                         att_left, att_right, pool)            // [D, T, B]
+        ? attn.build_graph_batched_local_chunked(ctx, attn_in, T, B, pe, pos_len, valid_len,
+                                                 att_left, att_right, pool)    // [D, T, B]
         : attn.build_graph_batched(ctx, attn_in, T, B, pe, pos_len, valid_len, pool);
     r = ggml_add(ctx, r, attn_out);
 
@@ -413,8 +413,8 @@ ggml_tensor* ConformerLayer::build_graph(ggml_context* ctx, ggml_tensor* xt,
     ggml_tensor* attn_in = layer_norm(r, "norm_self_att");
     RelPosAttention attn(ml_, layer_idx_);
     ggml_tensor* attn_out = local_attn
-        ? attn.build_graph_local(ctx, attn_in, T, pe, pos_len, valid_len,
-                                 att_left, att_right, pool)            // [D, T]
+        ? attn.build_graph_local_chunked(ctx, attn_in, T, pe, pos_len, valid_len,
+                                         att_left, att_right, pool)    // [D, T]
         : attn.build_graph(ctx, attn_in, T, pe, pos_len, valid_len, pool); // [D, T]
     r = ggml_add(ctx, r, attn_out);
 

@@ -16,12 +16,13 @@ namespace pk {
 // Decide the self-attention window for an encoder of Tp frames. Returns W>0 to
 // use NeMo rel_pos_local_attn [W,W] (banded, O(T*window)); -1 for full attention.
 //
-// The pad-and-shift kernel adds ~6*(2W+1) graph nodes per layer, so W is capped
-// to stay within the metadata-context budget (backend.cpp kGraphSize); W<=32
-// fits every shipped model. The efficient chunk-matmul construction (follow-up,
-// O(1) nodes) would lift this cap to NeMo's full [128,128].
+// The attention uses the chunk-matmul banded path (build_graph_local_chunked),
+// which emits O(1) graph nodes regardless of window, so W can go to NeMo's full
+// [128,128] without overflowing the metadata-context budget (backend.cpp
+// kGraphSize). (The older pad-and-shift path emitted ~6*(2W+1) nodes/layer,
+// which is why this was capped at 32.)
 static int local_attn_window(int Tp) {
-    constexpr int kMaxLocalWindow = 32;
+    constexpr int kMaxLocalWindow = 128;
     if (const char* e = std::getenv("PARAKEET_ATT_CONTEXT")) {
         const int w = std::atoi(e);
         if (w <= 0) return -1;                 // 0 / negative -> force full attention
