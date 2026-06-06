@@ -73,6 +73,27 @@ public:
                                            int att_left, int att_right,
                                            GraphInputPool& pool) const;
 
+    // CHUNK-MATMUL LOCAL GRAPH-BUILDER. Same math/output as build_graph_local
+    // (NeMo rel_pos_local_attn, banded O(T*window)) but built with O(1) graph
+    // nodes regardless of window: time is tiled into chunks of `chunk` frames,
+    // K/V are gathered as OVER-PADDED overlapping chunks (so ggml's dense
+    // ne-product view-bounds check passes), the per-chunk q.k blocks are one
+    // batched ggml_mul_mat, and a diagonal "skew" view extracts the [P,T] band.
+    // Lets the window go to NeMo's full [128,128] without the pad-and-shift
+    // path's O(window) nodes + O(window^2) concat. `pe` is the LOCAL positional
+    // encoding [D, att_left+att_right+1]. chunk<=0 picks a default.
+    ggml_tensor* build_graph_local_chunked(ggml_context* ctx, ggml_tensor* xt,
+                                           int T, ggml_tensor* pe, int pos_len,
+                                           int valid_len, int att_left, int att_right,
+                                           GraphInputPool& pool, int chunk = -1) const;
+
+    // Thin wrapper over build_graph_local_chunked (test entry point). Same
+    // signature/semantics as forward_local; output must match it.
+    void forward_local_chunked(const std::vector<float>& x, int T,
+                               const std::vector<float>& pos_emb, int pos_len,
+                               int valid_len, int att_left, int att_right,
+                               std::vector<float>& out, int chunk = -1) const;
+
     // x: [T, d_model]; pos_emb: [2T-1, d_model]; out: [T, d_model].
     void forward(const std::vector<float>& x, int T,
                  const std::vector<float>& pos_emb, int pos_len,
