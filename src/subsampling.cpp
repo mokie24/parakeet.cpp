@@ -435,7 +435,8 @@ void Subsampling::forward_tiled(const std::vector<float>& mel, int n_mels, int T
     const int Tp = subsample_len(T);
     d_model = d_model_;
     Tout = Tp;
-    valid_len = (valid_out_len(T, -1) > Tp) ? Tp : valid_out_len(T, -1);
+    const int vo = valid_out_len(T, -1);
+    valid_len = (vo > Tp) ? Tp : vo;
 
     // TODO: causal tiling needs the causal phase mapping; offline causal long-audio
     // is not a current target. Fall back to the single, untiled graph (== forward()).

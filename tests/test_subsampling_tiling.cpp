@@ -36,6 +36,9 @@ int main(){
         // bit-exact vs forward(). This validates the window->global frame mapping
         // (j0 = ws/8, halo alignment) with ZERO tolerance: any off-by-one in the
         // tiling arithmetic breaks it. (tile_out_frames > Tp => one window.)
+        // NOTE: keep T such that valid_out_len(T,-1) == Tp (no trailing mask),
+        // else forward() masks tail frames to bias and this all-element guard
+        // would false-fail. T=4000 satisfies this (vl==Tp).
         {
             std::vector<float> one; int a=0,b=0,c=0;
             sub.forward_tiled(mel, n_mels, T, Tp+1, one, a, b, c);
