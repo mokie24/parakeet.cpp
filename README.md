@@ -108,7 +108,7 @@ To build for a GPU backend, forward its flag, e.g. Apple Metal:
 cmake -B build -DPARAKEET_GGML_METAL=ON && cmake --build build -j
 ```
 
-The CLI auto-selects the first GPU device the ggml registry reports, so no runtime flag is needed (set `PARAKEET_DEVICE=cpu` to force CPU). Ops the chosen backend has no kernel for run on the CPU automatically, so a model always runs even when one op lacks a GPU kernel. On an Apple M4, Metal is up to about 5x faster than CPU on the larger models; see [Apple Metal](benchmarks/BENCHMARK.md#apple-metal-m4).
+The CLI auto-selects the first GPU device the ggml registry reports (including integrated GPUs such as Ryzen APUs), so no runtime flag is needed. Use `PARAKEET_DEVICE` to override: set it to `cpu` to force CPU, or to a specific device name like `CUDA0` or `Vulkan1` (case-insensitive) to pick that device. Ops the chosen backend has no kernel for run on the CPU automatically, so a model always runs even when one op lacks a GPU kernel. On an Apple M4, Metal is up to about 5x faster than CPU on the larger models; see [Apple Metal](benchmarks/BENCHMARK.md#apple-metal-m4).
 
 ---
 

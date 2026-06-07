@@ -9,6 +9,7 @@
 #include "ggml-cpu.h"
 
 #include <cassert>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -68,27 +69,59 @@ struct Backend::Impl {
 static thread_local Backend* t_active = nullptr;
 
 Backend::Backend(int n_threads) : impl_(new Impl()) {
-    // Optional override: PARAKEET_DEVICE=cpu forces the CPU backend (used to take
-    // a CPU baseline on a GPU box without rebuilding).
+    // Optional override via PARAKEET_DEVICE:
+    //   - "cpu"            forces the CPU backend (CPU baseline on a GPU box).
+    //   - a device name    selects that specific registry device by name, e.g.
+    //                      "CUDA0", "Vulkan1", "Metal" (case-insensitive).
+    //   - unset            auto-pick the first GPU / integrated-GPU device.
     const char* force = std::getenv("PARAKEET_DEVICE");
-    const bool force_cpu = force && std::string(force) == "cpu";
+    const std::string want = force ? force : "";
+    const bool force_cpu = want == "cpu" || want == "CPU";
+
+    // Case-insensitive equality, used to match PARAKEET_DEVICE against the
+    // registry's device names (which are upper-case like "CUDA0"/"Vulkan0").
+    auto iequals = [](const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i)
+            if (std::tolower((unsigned char)a[i]) != std::tolower((unsigned char)b[i]))
+                return false;
+        return true;
+    };
 
     if (!force_cpu) {
-        // Pick the first GPU device the registry reports. Whatever backend was
-        // compiled in (CUDA/Metal/Vulkan/HIP/SYCL) registers itself here, so this
-        // single path covers them all with no backend-specific includes.
+        // Walk the registry. Whatever backend was compiled in
+        // (CUDA/Metal/Vulkan/HIP/SYCL) registers itself here, so this single path
+        // covers them all with no backend-specific includes. Integrated GPUs
+        // (e.g. Ryzen APUs) report GGML_BACKEND_DEVICE_TYPE_IGPU and are eligible
+        // too. When PARAKEET_DEVICE names a device, match by name; otherwise pick
+        // the first GPU/IGPU device.
         for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
             ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-            if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
-                impl_->backend = ggml_backend_dev_init(dev, nullptr);
-                if (impl_->backend) {
-                    device_name_ = ggml_backend_dev_name(dev);
-                    impl_->use_sched = true;   // GPU device: route compute through ggml_backend_sched
-                    PK_LOG("pk::Backend using GPU device: %s", device_name_.c_str());
-                    break;
-                }
+            const auto type = ggml_backend_dev_type(dev);
+            const char* name = ggml_backend_dev_name(dev);
+
+            bool selected;
+            if (!want.empty()) {
+                selected = name && iequals(want, name);  // explicit name match
+            } else {
+                selected = type == GGML_BACKEND_DEVICE_TYPE_GPU ||
+                           type == GGML_BACKEND_DEVICE_TYPE_IGPU;
+            }
+            if (!selected) continue;
+
+            impl_->backend = ggml_backend_dev_init(dev, nullptr);
+            if (impl_->backend) {
+                device_name_ = name ? name : "";
+                // Route compute through ggml_backend_sched for any non-CPU device
+                // so unsupported ops can fall back to CPU.
+                impl_->use_sched = type != GGML_BACKEND_DEVICE_TYPE_CPU;
+                PK_LOG("pk::Backend using device: %s", device_name_.c_str());
+                break;
             }
         }
+        if (!want.empty() && !impl_->backend)
+            PK_LOG("pk::Backend: PARAKEET_DEVICE=%s not found; falling back to CPU",
+                   want.c_str());
     }
     if (!impl_->backend) {              // CPU fallback (or CPU-only build)
         impl_->backend = ggml_backend_cpu_init();

@@ -7,6 +7,7 @@ function(pk_add_test name)
 endfunction()
 
 pk_add_test(test_smoke)
+pk_add_test(test_backend_device)
 pk_add_test(test_audio_io)
 pk_add_test(test_model_loader)
 pk_add_test(test_fft)
