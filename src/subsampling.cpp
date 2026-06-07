@@ -45,6 +45,17 @@ int Subsampling::valid_out_len(int T, int in_valid_frames) const {
     return valid;
 }
 
+int Subsampling::subsample_len(int T) const {
+    // Spatial output length after the three stride-2, k=3 conv stages, using
+    // ggml conv2d's OH = floor((in + 2p - k)/s) + 1. Non-causal uses symmetric
+    // pad p=1 (all_paddings=2); causal uses all_paddings=3. This mirrors the
+    // valid_out_len recurrence but tracks the full (padded) spatial extent.
+    const int all_paddings = causal_ ? 3 : 2;
+    int x = T;
+    for (int s = 0; s < 3; ++s) x = (x + all_paddings - 3) / 2 + 1;
+    return x;
+}
+
 ggml_tensor* Subsampling::build_graph_batched(ggml_context* ctx,
                                       const float* mel,
                                       int n_mels, int T, int B, GraphInputPool& pool,

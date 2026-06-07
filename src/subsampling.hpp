@@ -67,6 +67,11 @@ public:
     // `in_valid_frames` (>=0) overrides the offline T-1 entry valid length
     // with an explicit count (streaming); <0 keeps the offline convention.
     int valid_out_len(int T, int in_valid_frames = -1) const;
+
+    // Number of (subsampled) output spatial frames an input of T mel frames
+    // produces, applying ggml conv2d's per-stage OH = floor((in+2p-k)/s)+1 for
+    // all three stride-2, k=3 stages. Used for subsampling-tile bookkeeping.
+    int subsample_len(int T) const;
 private:
     const ModelLoader& ml_;
     int conv_channels_;   // C
