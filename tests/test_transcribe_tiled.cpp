@@ -42,16 +42,23 @@ int main() {
         std::vector<std::vector<float>> batch{ audio.samples };
         return model->transcribe_pcm_batch(batch, 16000).at(0);
     };
+    // Single-clip path (CLI / path-based C-API route through transcribe_path ->
+    // transcribe_16k). Same clip, same fused-vs-tiled comparison.
+    auto run_single = [&]() -> std::string {
+        return model->transcribe_path("tests/fixtures/speech.wav");
+    };
 
-    std::string fused, tiled;
+    std::string fused, tiled, sfused, stiled;
     try {
         // 1) fused (env unset -> auto; short clip below threshold stays fused)
         unsetenv("PARAKEET_SUBSAMPLING_TILE");
         fused = run();
+        sfused = run_single();
 
         // 2) forced tiled path (small tile -> many tiles even on a short clip)
         setenv("PARAKEET_SUBSAMPLING_TILE", "17", 1);
         tiled = run();
+        stiled = run_single();
         unsetenv("PARAKEET_SUBSAMPLING_TILE");
     } catch (const std::exception& e) {
         std::fprintf(stderr, "test_transcribe_tiled: transcribe threw: %s\n", e.what());
@@ -70,6 +77,20 @@ int main() {
         return 1;
     }
 
+    if (sfused.empty()) {
+        std::fprintf(stderr,
+            "test_transcribe_tiled: single-clip fused transcript is EMPTY (vacuous)\n");
+        return 1;
+    }
+
+    if (sfused != stiled) {
+        std::fprintf(stderr,
+            "single-clip tiled transcript differs:\n fused=[%s]\n tiled=[%s]\n",
+            sfused.c_str(), stiled.c_str());
+        return 1;
+    }
+
     std::printf("transcribe tiled==fused: [%s]\n", fused.c_str());
+    std::printf("single-clip tiled==fused: [%s]\n", sfused.c_str());
     return 0;
 }
