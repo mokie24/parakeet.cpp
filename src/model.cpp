@@ -4,6 +4,7 @@
 #include "mel.hpp"
 #include "mel_gpu.hpp"
 #include "encoder.hpp"
+#include "subsampling.hpp"
 #include "ctc_decoder.hpp"
 #include "search.hpp"
 #include "tokenizer.hpp"
@@ -19,6 +20,7 @@
 #include "ggml_graph.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <stdexcept>
 #include <vector>
 
@@ -136,6 +138,21 @@ std::string Model::transcribe_16k(const std::vector<float>& pcm16k,
     return decode_enc_out(loader_, enc_out, d_model, Tout, use_tdt);
 }
 
+// Max mel frames per encoder pass before the first subsampling conv output
+// (n_mels/2 * T/2 * conv_channels) approaches INT_MAX. ggml's CUDA unary (relu)
+// kernel indexes elements with int32, so a tensor > 2^31 elements crashes
+// ("invalid configuration argument"). Bound the per-pass first-conv tensor to a
+// safe 1.5e9 elements: (n_mels/2)*(T/2)*C < 1.5e9  =>  T < 2*1.5e9 / ((n_mels/2)*C).
+static int safe_mel_window(const pk::ParakeetConfig& cfg) {
+    const long long per_t = (long long)((int)cfg.n_mels / 2) * (int)cfg.subsampling_conv_channels; // first-conv elems per output mel-row pair
+    if (per_t <= 0) return 1 << 30;            // unknown config -> effectively no cap
+    const long long bound = 1500000000LL;      // 1.5e9 elements, safe margin under 2^31
+    long long win = (2 * bound) / per_t;        // T such that (n_mels/2)*(T/2)*C ~= bound
+    if (win < 16384) win = 16384;               // floor for tiny/odd configs
+    if (win > (1LL<<30)) win = (1LL<<30);
+    return (int)win;
+}
+
 // Stage a batch of 16 kHz mono clips into a MelBatch: per-clip log-mel
 // (GpuMel on a non-CPU backend, else the byte-identical FFT MelFrontend),
 // zero-padded and stacked to the batch's longest clip (T_max). data layout is
@@ -201,7 +218,20 @@ std::vector<std::string> Model::transcribe_16k_batch(
     Encoder encoder(loader_);
     std::vector<std::vector<float>> enc_outs; int d_model = 0, Tout = 0;
     std::vector<int> valid_Tout;
-    encoder.forward_batch(mb, enc_outs, d_model, Tout, valid_Tout);
+    // Long audio: the first subsampling conv would exceed ggml's 2^31 element limit.
+    // Tile the subsampling stage (faithful; see Encoder::forward_batch_tiled). An env
+    // override forces the tiled path for testing on short clips.
+    int sub_tile = 0;                      // 0 => auto
+    if (const char* e = std::getenv("PARAKEET_SUBSAMPLING_TILE")) sub_tile = std::atoi(e);
+    const int win = safe_mel_window(cfg);
+    if (sub_tile > 0) {
+        encoder.forward_batch_tiled(mb, enc_outs, d_model, Tout, valid_Tout, sub_tile);
+    } else if (mb.T_max > win) {
+        const int tile_out = pk::Subsampling(loader_).subsample_len(win);
+        encoder.forward_batch_tiled(mb, enc_outs, d_model, Tout, valid_Tout, tile_out);
+    } else {
+        encoder.forward_batch(mb, enc_outs, d_model, Tout, valid_Tout);
+    }
 
     // 2b. Prompt conditioning per item (one language for the whole batch). No-op
     //     for non-prompt models.
@@ -348,7 +378,20 @@ std::vector<Transcription> Model::transcribe_16k_batch_with_timestamps(
     Encoder encoder(loader_);
     std::vector<std::vector<float>> enc_outs; int d_model = 0, Tout = 0;
     std::vector<int> valid_Tout;
-    encoder.forward_batch(mb, enc_outs, d_model, Tout, valid_Tout);
+    // Long audio: the first subsampling conv would exceed ggml's 2^31 element limit.
+    // Tile the subsampling stage (faithful; see Encoder::forward_batch_tiled). An env
+    // override forces the tiled path for testing on short clips.
+    int sub_tile = 0;                      // 0 => auto
+    if (const char* e = std::getenv("PARAKEET_SUBSAMPLING_TILE")) sub_tile = std::atoi(e);
+    const int win = safe_mel_window(cfg);
+    if (sub_tile > 0) {
+        encoder.forward_batch_tiled(mb, enc_outs, d_model, Tout, valid_Tout, sub_tile);
+    } else if (mb.T_max > win) {
+        const int tile_out = pk::Subsampling(loader_).subsample_len(win);
+        encoder.forward_batch_tiled(mb, enc_outs, d_model, Tout, valid_Tout, tile_out);
+    } else {
+        encoder.forward_batch(mb, enc_outs, d_model, Tout, valid_Tout);
+    }
 
     // Prompt conditioning per item (one language for the whole batch). No-op
     // for non-prompt models.
