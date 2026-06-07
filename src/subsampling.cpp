@@ -429,4 +429,65 @@ void Subsampling::forward(const std::vector<float>& mel, int n_mels, int T,
     valid_len = valid;
 }
 
+void Subsampling::forward_tiled(const std::vector<float>& mel, int n_mels, int T,
+                                int tile_out_frames, std::vector<float>& out,
+                                int& Tout, int& d_model, int& valid_len) const {
+    const int Tp = subsample_len(T);
+    d_model = d_model_;
+    Tout = Tp;
+    valid_len = (valid_out_len(T, -1) > Tp) ? Tp : valid_out_len(T, -1);
+
+    // TODO: causal tiling needs the causal phase mapping; offline causal long-audio
+    // is not a current target. Fall back to the single, untiled graph (== forward()).
+    if (causal_ || tile_out_frames <= 0) {
+        int t_unused = 0, dm_unused = 0, vl_unused = 0;
+        forward(mel, n_mels, T, out, t_unused, dm_unused, vl_unused, -1);
+        return;
+    }
+
+    // Non-causal symmetric-pad tiling. Receptive field is +-7 mel frames; output
+    // frame o has mel center 8*o. Window start ws is a multiple of 8, so the
+    // window-output frame j maps to global o = j + ws/8. A generous halo H=64 mel
+    // frames (>> RF) keeps every emitted frame's RF inside the fed window (or, at
+    // true utterance edges, inside build_graph's own pad which equals the boundary),
+    // so every kept frame equals the full-utterance result.
+    const int H = 64; // multiple of 8, >> receptive field (7)
+    out.assign((size_t)Tp * d_model_, 0.0f);
+
+    for (int os = 0; os < Tp; os += tile_out_frames) {
+        const int oe = (os + tile_out_frames < Tp) ? (os + tile_out_frames) : Tp;
+        int ws = 8 * os - H; if (ws < 0) ws = 0;       // multiple of 8 (clamp keeps it)
+        int we = 8 * oe + H; if (we > T) we = T;
+        const int Lw = we - ws;
+
+        // Slice window mel, feat-major [n_mels, Lw].
+        std::vector<float> win((size_t)n_mels * Lw);
+        for (int f = 0; f < n_mels; ++f)
+            for (int t = ws; t < we; ++t)
+                win[(size_t)f * Lw + (t - ws)] = mel[(size_t)f * T + t];
+
+        // Run the single-item graph on the window. The window is all-real, so pass
+        // in_valid_frames = Lw (no trailing mask inside the tile).
+        std::vector<float> win_out;
+        int Tpw = 0, valid_w = 0;
+        GraphInputPool pool;
+        bool ok = pk::run_graph(/*mem_bytes*/0, /*n_threads*/4,
+            [&](ggml_context* ctx) -> ggml_tensor* {
+                return build_graph(ctx, win, n_mels, Lw, pool, Tpw, valid_w, Lw);
+            }, win_out);
+        assert(ok && "subsampling tile graph failed");
+        (void)ok;
+
+        // Window-output frame j has mel center ws+8*j -> global o = j + ws/8.
+        const int j0 = ws / 8; // exact: ws is a multiple of 8
+        for (int o = os; o < oe; ++o) {
+            const int j = o - j0;
+            assert(j >= 0 && j < Tpw && "tile frame out of window range");
+            std::memcpy(&out[(size_t)o * d_model_],
+                        &win_out[(size_t)j * d_model_],
+                        (size_t)d_model_ * sizeof(float));
+        }
+    }
+}
+
 } // namespace pk
