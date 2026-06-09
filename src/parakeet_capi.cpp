@@ -1,5 +1,6 @@
 #include "parakeet_capi.h"
 #include "parakeet.h"     // pk::Decoder
+#include "ggml_graph.hpp" // pk::set_num_threads, pk::shutdown_backend
 #include "model.hpp"      // pk::Model
 #include "streaming.hpp"  // pk::StreamingSession
 #include "mel.hpp"        // pk::MelFrontend
@@ -196,6 +197,14 @@ std::string transcription_to_json(const pk::Transcription& tr, float frame_sec) 
 
 extern "C" int parakeet_capi_abi_version(void) {
     return PARAKEET_CAPI_ABI_VERSION;
+}
+
+extern "C" void parakeet_capi_set_num_threads(int n) {
+    pk::set_num_threads(n);
+}
+
+extern "C" void parakeet_capi_shutdown_backend(void) {
+    pk::shutdown_backend();
 }
 
 extern "C" parakeet_ctx* parakeet_capi_load(const char* gguf_path) {

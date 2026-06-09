@@ -39,6 +39,15 @@ parakeet_ctx* parakeet_capi_load(const char* gguf_path);
 // Free a context obtained from parakeet_capi_load. Safe on NULL.
 void parakeet_capi_free(parakeet_ctx* ctx);
 
+// Override the process-global ggml compute thread count used by parakeet.cpp.
+// Pass 0 to clear the override and fall back to the backend default.
+void parakeet_capi_set_num_threads(int n);
+
+// Release the process-global ggml backend explicitly. Call this after all
+// contexts and streams are destroyed so Metal / GPU resources are torn down
+// before process exit.
+void parakeet_capi_shutdown_backend(void);
+
 // Transcribe a WAV file. `decoder` selects the head:
 //   0 = default (by arch: transducer for tdt/rnnt/hybrid, CTC for ctc),
 //   1 = ctc (force CTC head),
